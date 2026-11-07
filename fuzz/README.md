@@ -1,12 +1,14 @@
 # Fuzzing
 
-The fuzz targets feed random input to the code that reads what PuppyBot gets from outside: so far only the command line of the program.
+The fuzz targets feed random input to the code that reads what PuppyBot gets from outside: so far the command line of the program, the configuration file and the files with secrets.
 Every parser of input from users, Discord or the configuration gets a target of its own.
 They run with [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) and libFuzzer.
 
 | Target | Input | Checks beyond not crashing |
 |---|---|---|
-| `cli_args` | The command line, as arguments separated by NUL bytes | The command line of what the parser understood is understood the same, and the program exits with one of its three exit statuses. |
+| `cli_args` | The command line, as arguments separated by NUL bytes | The command line of what the parser understood is understood the same, and the program prints the version or the help with the exit status 0, or an error with 2. It doesn't run the bot, which would read the files that the input names. |
+| `config` | The configuration file, as its text | An accepted configuration names a token file, at an absolute path, as the directory of the configuration file is. |
+| `token_file` | What a file with a secret holds | The secret is printable ASCII and the start of the input, and only line breaks follow it. |
 
 ## Running
 

@@ -1,0 +1,16 @@
+# The configuration of PuppyBot, with every setting: see the README's section Configuration.
+# Docker Compose puts it where the image looks for it, /etc/puppybot/config.toml, see
+# compose.yaml.
+
+[discord]
+# The file with the token of the bot: here the secret of compose.yaml. A relative path is relative
+# to the directory of this file.
+token-file = "/run/secrets/discord_token"
+
+# The table [log] may be left out, for these defaults.
+[log]
+# The most detailed level that is logged: error, warn, info, debug or trace. The environment
+# variable RUST_LOG takes precedence, e.g. RUST_LOG=debug.
+level = "info"
+# text, a line per message, or json, a JSON object per line, for log collectors.
+format = "text"

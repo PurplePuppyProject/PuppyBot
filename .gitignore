@@ -7,3 +7,6 @@
 
 ## Local configuration, which may hold tokens
 .env
+
+## Docker Compose example: the token of the bot, see docker/example/compose.yaml
+/docker/example/discord_token

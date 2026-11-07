@@ -22,3 +22,17 @@ path = "fuzz_targets/cli_args.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "token_file"
+path = "fuzz_targets/token_file.rs"
+test = false
+doc = false
+bench = false

@@ -1,28 +1,41 @@
-//! PuppyBot, a Discord bot of the Purple Puppy Project.
+//! PuppyBot, a Discord bot of the Purple Puppy Project: the program.
 //!
-//! So far a skeleton: the program understands `--version` and `--help`, and the CI around it
-//! checks, tests, fuzzes and publishes it. `src/main.rs` only hands over to [`run`], so the tests
-//! reach everything the program does.
+//! So far it reads its configuration and the token of the bot, logs, and runs until a signal
+//! stops it; the connection to Discord comes next. `src/main.rs` only hands over to [`run`], so
+//! the tests reach everything the program does.
 
+#[cfg(not(unix))]
+compile_error!("PuppyBot runs on Linux and other Unix systems");
+
+use std::error::Error;
 use std::ffi::OsString;
+use std::fmt::Display;
 use std::io::Write;
+use std::path::Path;
 
 pub mod cli;
-#[cfg(all(unix, any(test, fuzzing)))]
+pub mod config;
+pub mod files;
+#[cfg(any(test, fuzzing))]
 pub mod fuzz;
+pub mod logging;
+pub mod secret;
+pub mod shutdown;
 
 /// The version of PuppyBot, from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The exit status when the program did what it was asked.
+/// The exit status when the program did what it was asked, or a signal stopped it.
 pub const EXIT_SUCCESS: u8 = 0;
-/// The exit status when the program couldn't do what it was asked.
+/// The exit status when the program couldn't run, e.g. as the token file is missing.
 pub const EXIT_FAILURE: u8 = 1;
-/// The exit status for a command line that PuppyBot doesn't understand.
+/// The exit status for a command line, configuration file or `RUST_LOG` that PuppyBot can't
+/// use.
 pub const EXIT_USAGE: u8 = 2;
 
 /// Runs PuppyBot with the arguments after the name of the program, writes what it prints to
-/// `out` and its errors to `err`, and returns the exit status.
+/// `out` and its errors to `err`, and returns the exit status. Once logging is set up, errors go
+/// to the log instead.
 ///
 /// `out` and `err` are trait objects, not generic: the coverage of a generic function counts
 /// only its best instantiation, so the tests' writers would have to cover all of it alone.
@@ -34,15 +47,9 @@ where
     match cli::parse(args) {
         Ok(cli::Action::Version) => print(out, &format!("puppybot {VERSION}\n")),
         Ok(cli::Action::Help) => print(out, cli::USAGE),
-        Ok(cli::Action::Run) => {
-            // If the error can't be written either, there is nothing left to tell it to.
-            let _ = writeln!(
-                err,
-                "puppybot: the bot itself doesn't exist yet, only --version and --help do"
-            );
-            EXIT_FAILURE
-        }
+        Ok(cli::Action::Run { config }) => start(&config, err),
         Err(error) => {
+            // If the error can't be written either, there is nothing left to tell it to.
             let _ = write!(err, "puppybot: {error}\n\n{}", cli::USAGE);
             EXIT_USAGE
         }
@@ -56,6 +63,55 @@ fn print(out: &mut dyn Write, text: &str) -> u8 {
         Ok(()) => EXIT_SUCCESS,
         Err(_) => EXIT_FAILURE,
     }
+}
+
+/// Starts the bot with the configuration file at `path`, and returns the exit status once it
+/// stopped.
+fn start(path: &Path, err: &mut dyn Write) -> u8 {
+    let config = match config::load(path) {
+        Ok(config) => config,
+        Err(error) => return usage_error(err, &error),
+    };
+    if let Err(error) = logging::init(config.log, std::env::var_os("RUST_LOG")) {
+        return usage_error(err, &error);
+    }
+    match serve(&config, path) {
+        Ok(stop) => {
+            tracing::info!(signal = stop.name(), "PuppyBot stopped");
+            EXIT_SUCCESS
+        }
+        Err(error) => {
+            tracing::error!("PuppyBot can't run: {error}");
+            EXIT_FAILURE
+        }
+    }
+}
+
+/// Writes an error about the command line or the configuration, before logging is set up.
+fn usage_error(err: &mut dyn Write, error: &dyn Display) -> u8 {
+    let _ = writeln!(err, "puppybot: {error}");
+    EXIT_USAGE
+}
+
+/// Reads the secrets, and runs until a signal stops PuppyBot.
+fn serve(config: &config::Config, path: &Path) -> Result<shutdown::Stop, Box<dyn Error>> {
+    let secrets = secret::Secrets::load(config)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        // Caught before saying that PuppyBot started, which tells that it may be stopped.
+        let mut signals = shutdown::Signals::new()?;
+        tracing::info!(
+            version = VERSION,
+            config = %path.display(),
+            "PuppyBot started; it doesn't connect to Discord yet"
+        );
+        let stop = signals.recv().await;
+        // Kept until here for the connection to Discord, which comes next.
+        drop(secrets);
+        Ok(stop)
+    })
 }
 
 #[cfg(test)]
@@ -92,13 +148,6 @@ mod tests {
     }
 
     #[test]
-    fn the_bot_does_not_run_yet() {
-        let (status, out, err) = run_strs(&[]);
-        assert_eq!((status, out.as_str()), (EXIT_FAILURE, ""));
-        assert!(err.contains("doesn't exist yet"), "{err}");
-    }
-
-    #[test]
     fn a_wrong_command_line_shows_the_usage() {
         assert_eq!(
             run_strs(&["--bogus"]),
@@ -107,6 +156,21 @@ mod tests {
                 String::new(),
                 format!("puppybot: unknown argument \"--bogus\"\n\n{}", cli::USAGE)
             )
+        );
+    }
+
+    #[test]
+    fn a_configuration_that_can_not_be_read() {
+        // Fails before logging is set up, so the error goes to err. Running the bot itself is
+        // tested by tests/run.rs, with the program in processes of their own.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.toml");
+        let path = path.to_str().unwrap();
+        let (status, out, err) = run_strs(&["--config", path]);
+        assert_eq!((status, out.as_str()), (EXIT_USAGE, ""));
+        assert!(
+            err.starts_with(&format!("puppybot: can't read the configuration {path}: ")),
+            "{err}"
         );
     }
 
