@@ -1,0 +1,24 @@
+[package]
+name = "puppybot-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+puppybot = { path = ".." }
+
+# A workspace of its own, so the main crate's Cargo.lock stays free of fuzzing dependencies.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "cli_args"
+path = "fuzz_targets/cli_args.rs"
+test = false
+doc = false
+bench = false

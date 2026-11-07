@@ -1,0 +1,8 @@
+# Tokens that help libFuzzer find valid input, see fuzz/README.md.
+
+# The options of the command line, and the separator of the arguments.
+"--version"
+"--help"
+"-V"
+"-h"
+"\x00"

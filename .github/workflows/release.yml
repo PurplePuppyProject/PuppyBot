@@ -1,0 +1,330 @@
+name: Release binaries and Docker image
+# Static binaries of PuppyBot for Linux on amd64 and arm64, linked with musl so they run on any
+# distribution, each built and tested on a runner of its architecture. The Docker image with
+# these binaries, on distroless static (see docker/Dockerfile), becomes ghcr.io/<owner>/puppybot:
+# for each commit on main :edge and :sha-<commit>, for a version tag, e.g. v0.1.0, :<version>,
+# e.g. :0.1.0. :latest is the newest release that isn't a pre-release, or main as long as there
+# is none. A version tag also publishes the release of that version on GitHub, with the binaries,
+# their checksums and the version's section of CHANGELOG.md as notes, see Releasing in the
+# README. The binaries and the image come with attestations of the workflow run that built them.
+# Pull requests only build and test them, so a change that breaks them shows before it is merged.
+#
+# Releases are created as drafts and published once they have all files, so release immutability
+# (Settings, General, Releases) may be on: it makes a published release unchangeable.
+on:
+  push:
+    branches: ["main"]
+    # Versions, e.g. v0.1.0 or v1.0.0-rc.1.
+    tags: ["v*"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A new push to a pull request cancels the run for the previous one. On main, a run finishes
+  # before the next one starts, so publishing isn't interrupted halfway.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+defaults:
+  run:
+    shell: bash
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    name: Build and test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    # A test that hangs mustn't hold up the runs of newer commits on main for hours.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          # The ARM runners are free for public repositories, and run the tests natively.
+          - name: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    env:
+      TARGET: ${{ matrix.target }}
+      ARCHIVE: puppybot-linux-${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: Install Ubuntu packages
+        # musl-gcc, for C code that dependencies compile, e.g. the cryptography of TLS.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Run tests
+        # In release mode, like the binary below, which reuses most of the compiled code.
+        run: cargo test --release --locked --target "$TARGET"
+      - name: Build binary
+        run: cargo build --release --locked --target "$TARGET" --bins
+      - name: Pack binary
+        run: |
+          mkdir -p "$ARCHIVE"
+          cp "target/$TARGET/release/puppybot" README.md CHANGELOG.md LICENSE "$ARCHIVE/"
+          # The image has no C library, so the binary must not need shared libraries.
+          if readelf --dynamic "$ARCHIVE/puppybot" | grep --quiet '(NEEDED)'; then
+            readelf --dynamic "$ARCHIVE/puppybot"
+            echo "::error::The binary for $TARGET needs shared libraries, but must be static."
+            exit 1
+          fi
+          "$ARCHIVE/puppybot" --version
+          tar --create --gzip --owner=0 --group=0 --numeric-owner --file "$ARCHIVE.tar.gz" "$ARCHIVE"
+      - name: Upload archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ env.ARCHIVE }}.tar.gz
+          if-no-files-found: error
+          # Re-running the job replaces the archive of the previous attempt.
+          overwrite: true
+
+  publish:
+    name: Publish release ${{ github.ref_name }}
+    needs: build
+    # Version tags only, not commits on main, pull requests or runs started by hand.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the attestations
+      attestations: write # store the attestations
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      # For the version and its changes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the version tag
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::The tag $TAG doesn't match the version in Cargo.toml, $version. Tag the commit that sets the version with v$version."
+            exit 1
+          fi
+          # Only what was merged into main becomes a release.
+          status=$(gh api "repos/$GH_REPO/compare/main...$GITHUB_SHA" --jq .status)
+          if [ "$status" != identical ] && [ "$status" != behind ]; then
+            echo "::error::The tag $TAG is on a commit that isn't on main."
+            exit 1
+          fi
+          # The version's section of the changelog, for the release notes.
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found
+          ' CHANGELOG.md > changes.md
+          if ! grep -q '[^[:space:]]' changes.md; then
+            echo "::error::CHANGELOG.md has no section for $version. Rename the section [Unreleased] to [$version] with the date."
+            exit 1
+          fi
+      - name: Download archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: puppybot-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum puppybot-linux-*.tar.gz | tee SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/puppybot-linux-*.tar.gz
+      - name: Publish the release
+        run: |
+          version=${TAG#v}
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          url="https://github.com/$GH_REPO"
+          {
+            echo "## Changes"
+            echo
+            # Links relative to the changelog lead to the files of this version.
+            perl -pe "s{\]\((?!https?://|#)([^)]+)\)}{]($url/blob/$TAG/\$1)}g" changes.md
+            echo
+            echo "## Docker"
+            echo
+            echo "\`ghcr.io/$owner/puppybot:$version\`, see [Docker]($url/blob/$TAG/README.md#docker) in the README."
+            echo
+            echo "## Downloads"
+            echo
+            cat <<EOF
+          | Architecture | File |
+          |---|---|
+          | x86_64: PCs and most servers | \`puppybot-linux-amd64.tar.gz\` |
+          | 64-bit ARM (AArch64), e.g. Raspberry Pi 3 or newer with a 64-bit system | \`puppybot-linux-arm64.tar.gz\` |
+
+          The binaries are linked statically with musl, so they run on any Linux distribution. Each archive holds \`puppybot\` with the README, the changelog and the license.
+
+          To check a download, compare its checksum, and verify with the [GitHub CLI](https://cli.github.com) that this repository's workflow built it:
+
+          \`\`\`sh
+          sha256sum --check --ignore-missing SHA256SUMS
+          gh attestation verify puppybot-linux-amd64.tar.gz --repo $GH_REPO
+          \`\`\`
+          EOF
+          } > notes.md
+
+          # A version with a suffix, e.g. -rc.1, is a pre-release.
+          prerelease=()
+          if [[ $version == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          # The files of a published version don't change. A draft is left of an earlier attempt
+          # that failed, which this one completes.
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "::error::The release $TAG is published already. To publish it again, delete the release first, not its tag."
+              exit 1
+            fi
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" "${prerelease[@]}" --title "PuppyBot $version" --notes-file notes.md
+          else
+            gh release create "$TAG" dist/* --draft "${prerelease[@]}" --verify-tag \
+              --title "PuppyBot $version" --notes-file notes.md
+          fi
+          # Published only once it has all files.
+          gh release edit "$TAG" --draft=false
+
+  docker:
+    name: Build and test the Docker image
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: puppybot-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Prepare the build context
+        run: docker/build-context.sh dist context
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the image for all platforms
+        # Like the job publish-image below, so a change that breaks it shows here.
+        run: docker buildx build --file docker/Dockerfile --platform linux/amd64,linux/arm64 context
+      - name: Test the image
+        # The image for amd64, started as restricted as the README's section Docker suggests.
+        run: |
+          docker buildx build --file docker/Dockerfile --platform linux/amd64 \
+            --tag puppybot:test --load context
+          user=$(docker image inspect --format '{{.Config.User}}' puppybot:test)
+          if [ "$user" != 65532:65532 ]; then
+            echo "::error::The image runs as '$user', not as the user without privileges, 65532:65532."
+            exit 1
+          fi
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+            puppybot:test --version
+
+  publish-image:
+    name: Publish the Docker image
+    needs: [docker, publish]
+    # Commits on main, whose job publish is skipped. Version tags once the job publish checked
+    # the tag and published the release.
+    if: >-
+      !cancelled() && needs.docker.result == 'success' &&
+      (github.ref == 'refs/heads/main' ||
+      (startsWith(github.ref, 'refs/tags/v') && needs.publish.result == 'success'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push the image
+      id-token: write # sign the attestation
+      attestations: write # store the attestation
+    steps:
+      # For the version of the program.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: puppybot-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Prepare the build context
+        run: docker/build-context.sh dist context
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push the image
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          image=ghcr.io/$owner/puppybot
+          short=${GITHUB_SHA::7}
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # The job publish checked that the tag is v$version.
+            tags=("$version")
+          else
+            # A re-run of an older run must not replace the image of a newer commit.
+            head=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+            if [ "$head" != "$GITHUB_SHA" ]; then
+              echo "::notice::Not published: main is at $head now, its run publishes it."
+              exit 0
+            fi
+            tags=(edge "sha-$short")
+            version=$version+$short
+          fi
+          # :latest is the newest release that isn't a pre-release, or main as long as there is
+          # none.
+          newest=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select((.draft or .prerelease) | not) | .tag_name' | sort -V | tail -n 1)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$GITHUB_REF_NAME" = "$newest" ]; then
+              tags+=(latest)
+            fi
+          elif [ -z "$newest" ]; then
+            tags+=(latest)
+          fi
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(--tag "$image:$tag")
+          done
+          # The index of an image for several platforms describes it on GitHub.
+          docker buildx build --file docker/Dockerfile --platform linux/amd64,linux/arm64 \
+            "${tag_args[@]}" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$version" \
+            --annotation "index:org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --annotation "index:org.opencontainers.image.revision=$GITHUB_SHA" \
+            --annotation "index:org.opencontainers.image.licenses=GPL-3.0-only" \
+            --annotation "index:org.opencontainers.image.description=PuppyBot $version, a Discord bot of the Purple Puppy Project" \
+            --metadata-file metadata.json --push context
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$(jq --raw-output '."containerimage.digest"' metadata.json)" >> "$GITHUB_OUTPUT"
+      - name: Attest build provenance
+        # Skipped when the step above published nothing.
+        if: steps.push.outputs.digest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
