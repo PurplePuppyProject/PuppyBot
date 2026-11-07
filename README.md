@@ -1,5 +1,9 @@
 # PuppyBot
 
+<p align="center">
+  <img src="docs/puppybot_logo.jpg" width="320" alt="The logo of PuppyBot: a white robot puppy with floppy grey ears and big green eyes, holding a screen with a green heart, in a corridor of servers">
+</p>
+
 A Discord bot of the Purple Puppy Project, written in Rust; a Signal bot may follow.
 
 **Status: planned, not built yet.** The repository has its CI, the release workflow and a skeleton of the program that knows only `--version` and `--help`. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
@@ -47,7 +51,7 @@ docker buildx imagetools inspect ghcr.io/purplepuppyproject/puppybot:edge --form
 | `fuzz/` | The fuzz targets, a workspace of its own, see [fuzz/README.md](fuzz/README.md) |
 | `docker/` | The Dockerfile, the script that prepares its build context, and the check of its SBOMs |
 | `utils/` | `set-version.sh`, which prepares a release |
-| `docs/PLAN.md` | What was decided in planning, and the next steps |
+| `docs/` | `PLAN.md`, with what was decided in planning and the next steps, and the logo, `puppybot_logo.jpg` |
 
 ## Development
 
