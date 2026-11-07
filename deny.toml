@@ -1,7 +1,8 @@
 # Checks of the dependencies with cargo deny, run by .github/workflows/deny.yml:
 # - advisories: known vulnerabilities, unmaintained or unsound crates, yanked versions
 # - licenses: only licenses compatible with the GPL-3.0-only of PuppyBot
-# - bans: no wildcard version requirements
+# - bans: no wildcard version requirements, and none of the crates that the decisions in
+#   docs/PLAN.md rule out
 # - sources: crates only from crates.io
 #
 # Documentation: https://embarkstudios.github.io/cargo-deny/
@@ -39,6 +40,19 @@ unused-allowed-license = "allow"
 # Several versions of a crate cost build time and size, but aren't a risk on their own.
 multiple-versions = "warn"
 wildcards = "deny"
+# The crates of the workspace depend on each other by path, which isn't a wildcard for crates
+# that aren't published.
+allow-wildcard-paths = true
+# TLS goes through rustls with ring as its cryptography (see docs/PLAN.md), so neither a second
+# cryptography library nor OpenSSL. rustls and most crates that use it enable aws-lc-rs by
+# default: turn their default features off and choose ring.
+deny = [
+    { crate = "aws-lc-rs", reason = "rustls uses ring, see docs/PLAN.md" },
+    { crate = "aws-lc-sys", reason = "rustls uses ring, see docs/PLAN.md" },
+    { crate = "native-tls", reason = "TLS only with rustls, see docs/PLAN.md" },
+    { crate = "openssl", reason = "TLS only with rustls, see docs/PLAN.md" },
+    { crate = "openssl-sys", reason = "TLS only with rustls, see docs/PLAN.md" },
+]
 
 [sources]
 unknown-registry = "deny"

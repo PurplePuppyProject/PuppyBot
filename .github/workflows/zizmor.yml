@@ -1,0 +1,36 @@
+name: Workflow audit (zizmor)
+# zizmor audits the workflows for security problems, e.g. template injection, credentials that
+# persist, or jobs with more permissions than they need. With the token, also with what GitHub
+# knows: actions with known vulnerabilities, or pins to commits that aren't in the action's
+# repository. Its findings show as annotations of the pull request.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    # New advisories for actions also affect unchanged workflows, so check regularly.
+    - cron: '29 6 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A new push to a pull request cancels the run for the previous one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install zizmor
+        # Pinned, as Dependabot doesn't update it: a new release is used only once someone
+        # looked at it. Bump deliberately.
+        run: pipx install zizmor==1.32.0
+      - name: Audit the workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make zizmor ZIZMOR_ARGS=--format=github

@@ -7,6 +7,8 @@ name: Release binaries and Docker image
 # is none. A version tag also publishes the release of that version on GitHub, with the binaries,
 # their checksums and the version's section of CHANGELOG.md as notes, see Releasing in the
 # README. The binaries and the image come with attestations of the workflow run that built them.
+# cargo auditable embeds the list of crates in each binary, so scanners like Trivy or Grype find
+# vulnerable crates in it, and the image carries an SBOM that lists them, see docker/check-sbom.py.
 # Pull requests only build and test them, so a change that breaks them shows before it is merged.
 #
 # Releases are created as drafts and published once they have all files, so release immutability
@@ -65,11 +67,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
+      - name: Install cargo-auditable and cargo-audit
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-auditable,cargo-audit
       - name: Run tests
         # In release mode, like the binary below, which reuses most of the compiled code.
         run: cargo test --release --locked --target "$TARGET"
       - name: Build binary
-        run: cargo build --release --locked --target "$TARGET" --bins
+        # With the list of its crates embedded in the section .dep-v0.
+        run: cargo auditable build --release --locked --target "$TARGET" --bins
       - name: Pack binary
         run: |
           mkdir -p "$ARCHIVE"
@@ -80,8 +87,15 @@ jobs:
             echo "::error::The binary for $TARGET needs shared libraries, but must be static."
             exit 1
           fi
+          if ! readelf --section-headers "$ARCHIVE/puppybot" | grep --quiet '\.dep-v0'; then
+            echo "::error::The binary for $TARGET lacks the list of its crates (section .dep-v0)."
+            exit 1
+          fi
           "$ARCHIVE/puppybot" --version
           tar --create --gzip --owner=0 --group=0 --numeric-owner --file "$ARCHIVE.tar.gz" "$ARCHIVE"
+      - name: Audit the crates in the binary
+        # From the list that cargo auditable embedded, against the advisories of RustSec.
+        run: cargo audit bin "$ARCHIVE/puppybot"
       - name: Upload archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -92,7 +106,8 @@ jobs:
           overwrite: true
 
   publish:
-    name: Publish release ${{ github.ref_name }}
+    # Without the tag in the name: a skipped job shows its name unevaluated.
+    name: Publish the release
     needs: build
     # Version tags only, not commits on main, pull requests or runs started by hand.
     if: startsWith(github.ref, 'refs/tags/v')
@@ -221,8 +236,14 @@ jobs:
         run: docker/build-context.sh dist context
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build the image for all platforms
-        # Like the job publish-image below, so a change that breaks it shows here.
-        run: docker buildx build --file docker/Dockerfile --platform linux/amd64,linux/arm64 context
+        # Like the job publish-image below, with SBOM and provenance, so a change that breaks
+        # them shows here. Written as an OCI layout, which keeps the attestations.
+        run: |
+          docker buildx build --file docker/Dockerfile --platform linux/amd64,linux/arm64 \
+            --sbom=true --provenance=mode=max --output type=oci,dest=image.tar context
+      - name: Check the SBOMs
+        # Each platform's SBOM must list the crates in the binary, which cargo auditable embedded.
+        run: python3 docker/check-sbom.py image.tar puppybot puppybot-core
       - name: Test the image
         # The image for amd64, started as restricted as the README's section Docker suggests.
         run: |
@@ -308,8 +329,10 @@ jobs:
           for tag in "${tags[@]}"; do
             tag_args+=(--tag "$image:$tag")
           done
-          # The index of an image for several platforms describes it on GitHub.
+          # The index of an image for several platforms describes it on GitHub. The SBOM lists
+          # the crates in the binary, see the job docker.
           docker buildx build --file docker/Dockerfile --platform linux/amd64,linux/arm64 \
+            --sbom=true --provenance=mode=max \
             "${tag_args[@]}" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --label "org.opencontainers.image.version=$version" \

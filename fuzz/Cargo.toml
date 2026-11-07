@@ -10,9 +10,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
-puppybot = { path = ".." }
+puppybot = { path = "../crates/puppybot" }
 
-# A workspace of its own, so the main crate's Cargo.lock stays free of fuzzing dependencies.
+# A workspace of its own, so the Cargo.lock of PuppyBot stays free of fuzzing dependencies.
 [workspace]
 members = ["."]
 

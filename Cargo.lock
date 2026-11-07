@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "puppybot"
 version = "0.1.0"
+dependencies = [
+ "puppybot-core",
+]
+
+[[package]]
+name = "puppybot-core"
+version = "0.1.0"

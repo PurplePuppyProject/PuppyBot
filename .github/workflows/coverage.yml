@@ -1,5 +1,6 @@
-name: Coverage (100 % of lines)
-# The Cargo tests must cover every line: make coverage fails below COVERAGE_MIN in the Makefile.
+name: Coverage (100 % of lines and functions)
+# The Cargo tests must cover every line and every function: make coverage fails below
+# COVERAGE_MIN in the Makefile.
 # The summary goes to the run's page and the reports are kept as an artifact. A job of its own
 # uploads them to Codecov, so the OIDC token that Codecov checks is never available to the code
 # that the tests run, which includes the build scripts of all dependencies.
@@ -33,7 +34,7 @@ jobs:
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-llvm-cov
-      - name: Measure the coverage (fails below 100 % of lines)
+      - name: Measure the coverage (fails below 100 % of lines or functions)
         run: make coverage ARGS=--locked
       - name: Show the summary on the run's page
         if: ${{ !cancelled() }}

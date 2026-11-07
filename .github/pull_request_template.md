@@ -5,7 +5,7 @@
 ## How to see it
 
 <!-- Where to look: the command, event or setting on Discord (or Signal), the configuration, the
-Docker image. For anything users see, a screenshot of what the bot answers. -->
+Docker image. For anything users see, a screenshot of what the bot answers, in German and English. -->
 
 ## Tried on
 
@@ -14,10 +14,12 @@ For crashes or wrong answers, attach the log, without tokens or other secrets. -
 
 ## Checklist
 
-- [ ] `make check` passes (rustfmt, Clippy, docs, the tests with 100 % line coverage, cargo deny), as CI runs it
-- [ ] `make fuzz` passes where the change touches input from users, Discord or the configuration; a new parser has a fuzz target
+- [ ] `make check` passes (rustfmt, Clippy, docs, the dependencies of `puppybot-core`, the tests with 100 % of lines and functions covered, cargo deny, zizmor), as CI runs it
+- [ ] `make fuzz` passes where the change touches input from users, Discord, feeds or the configuration; a new parser has a fuzz target
 - [ ] A fixed bug has a test that would catch it again; a new feature has tests that cover all of it
 - [ ] Changes users can notice are in `CHANGELOG.md` under `## [Unreleased]`, in the section they belong to (Added, Changed, Fixed or Removed), written for users, in English
-- [ ] No secrets in the code, tests, examples or logs: tokens come from the configuration and are never logged
+- [ ] Every text users see is a typed text in `puppybot-core`, in German and English; dates and times go out as Discord timestamps
+- [ ] `puppybot-core` stays free of Discord, storage and I/O
+- [ ] No secrets in the code, tests, examples or logs: they come only from files and are never logged
 - [ ] No `unsafe`; a new dependency is needed, maintained and passes `cargo deny`
-- [ ] The README still says how things work
+- [ ] The README and `docs/PLAN.md` still say how things work

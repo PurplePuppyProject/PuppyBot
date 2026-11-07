@@ -1,6 +1,6 @@
 # Fuzzing
 
-The fuzz targets feed random input to the code that reads what PuppyBot gets from outside: so far only the command line.
+The fuzz targets feed random input to the code that reads what PuppyBot gets from outside: so far only the command line of the program.
 Every parser of input from users, Discord or the configuration gets a target of its own.
 They run with [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) and libFuzzer.
 
@@ -42,17 +42,17 @@ libFuzzer saves the input that made the target fail in `artifacts/<target>/`, an
 cargo +nightly fuzz run cli_args artifacts/cli_args/crash-<hash>
 ```
 
-`cargo +nightly fuzz tmin cli_args artifacts/cli_args/crash-<hash>` shortens the input. Once the bug is fixed, add the input to the smoke test of the target in `src/fuzz.rs`, so it stays fixed.
+`cargo +nightly fuzz tmin cli_args artifacts/cli_args/crash-<hash>` shortens the input. Once the bug is fixed, add the input to the smoke test of the target in the crate's `src/fuzz.rs`, so it stays fixed.
 
 ## How It Works
 
-- The functions the targets call are in [`src/fuzz.rs`](../src/fuzz.rs), which is compiled with `--cfg fuzzing`, which cargo fuzz sets, and for the tests.
+- The functions the targets call are in the `src/fuzz.rs` of the crate whose parser they feed, so far [`crates/puppybot/src/fuzz.rs`](../crates/puppybot/src/fuzz.rs). It is compiled with `--cfg fuzzing`, which cargo fuzz sets, and for the tests.
 - `cargo test` runs each of these functions on a few inputs, as a smoke test that needs neither nightly nor cargo-fuzz.
-- The fuzz crate has a workspace and a `Cargo.lock` of its own, so the main crate's `Cargo.lock` stays free of fuzzing dependencies.
+- The fuzz crate has a workspace and a `Cargo.lock` of its own, so the `Cargo.lock` of PuppyBot stays free of fuzzing dependencies.
 - CI ([`.github/workflows/fuzz.yml`](../.github/workflows/fuzz.yml)) runs each target for 30 seconds on pull requests and for 15 minutes once a week. It can also be started by hand, with the time per target. If a target fails, the input is uploaded as the artifact `fuzz-artifacts`.
 
 ## Adding a Target
 
-1. Add a function to `src/fuzz.rs` that feeds its input to the parser and checks what it can, with a smoke test.
+1. Add a function to the crate's `src/fuzz.rs` that feeds its input to the parser and checks what it can, with a smoke test. A crate without one yet gets the module like `crates/puppybot`: `#[cfg(all(unix, any(test, fuzzing)))] pub mod fuzz;`, and becomes a dependency in `Cargo.toml`.
 2. Add `fuzz_targets/<target>.rs`, which calls it, like the others.
 3. Add a `[[bin]]` section for it to `Cargo.toml`.

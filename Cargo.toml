@@ -1,25 +1,31 @@
-[package]
-name = "puppybot"
+# The crates of PuppyBot, see Project Layout in the README:
+# - crates/puppybot-core: the bot's logic, parsers and texts, without Discord, storage or I/O
+# - crates/puppybot: the program, which connects that logic to Discord, storage and the network
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+# The version of PuppyBot, which make version sets, see Releasing in the README.
 version = "0.1.0"
 edition = "2024"
 # Keep in sync with the job msrv in .github/workflows/rust-build.yml.
 rust-version = "1.85"
-description = "PuppyBot, a Discord bot of the Purple Puppy Project."
 license = "GPL-3.0-only"
-readme = "README.md"
 repository = "https://github.com/PurplePuppyProject/PuppyBot"
-# A program, deployed as a Docker image, not a library for crates.io.
+# A program, deployed as a Docker image, not libraries for crates.io.
 publish = false
 
-[dependencies]
+[workspace.dependencies]
+puppybot-core = { path = "crates/puppybot-core" }
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
 # cargo-llvm-cov sets cfg(coverage), on nightly also cfg(coverage_nightly). cargo fuzz sets
 # cfg(fuzzing), which makes the entry points for fuzzing public, see fuzz/.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)", "cfg(coverage_nightly)", "cfg(fuzzing)"] }
 
-[lints.clippy]
+[workspace.lints.clippy]
 # Strict from the start, which costs less than tightening later: the pedantic lints, and nothing
 # that panics on input the bot gets, so a message can't stop it. Tests may unwrap, expect and
 # panic, see clippy.toml. CI turns all warnings into errors.
