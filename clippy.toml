@@ -1,0 +1,9 @@
+# A failed unwrap, expect or panic in a test shows where the test failed, see [lints.clippy] in
+# Cargo.toml for the code of the bot.
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+
+# Words in docs that are names, not code to put in backticks. ".." keeps Clippy's own list.
+doc-valid-idents = ["PuppyBot", ".."]

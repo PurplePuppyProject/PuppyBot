@@ -1,0 +1,16 @@
+[package]
+name = "puppybot-core"
+description = "PuppyBot, a Discord bot of the Purple Puppy Project: its logic, parsers and texts, without Discord, storage or I/O."
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Only crates without I/O: no twilight, no redb, no tokio, no network. make lint checks it.
+[dependencies]
+
+[lints]
+workspace = true

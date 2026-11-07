@@ -1,0 +1,9 @@
+## Cargo
+/target
+
+## Release workflow, when run by hand: archives and the Docker build context
+/dist
+/context
+
+## Local configuration, which may hold tokens
+.env

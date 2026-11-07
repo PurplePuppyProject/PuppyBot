@@ -1,0 +1,86 @@
+name: Coverage (100 % of lines and functions)
+# The Cargo tests must cover every line and every function: make coverage fails below
+# COVERAGE_MIN in the Makefile.
+# The summary goes to the run's page and the reports are kept as an artifact. A job of its own
+# uploads them to Codecov, so the OIDC token that Codecov checks is never available to the code
+# that the tests run, which includes the build scripts of all dependencies.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A new push to a pull request cancels the run for the previous one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  coverage:
+    name: Measure coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-llvm-cov
+      - name: Measure the coverage (fails below 100 % of lines or functions)
+        run: make coverage ARGS=--locked
+      - name: Show the summary on the run's page
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo '## Coverage'
+            echo
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-report
+          # lcov.info for Codecov, html/ with the covered lines of each file.
+          path: |
+            target/llvm-cov/lcov.info
+            target/llvm-cov/html
+          if-no-files-found: ignore
+
+  codecov:
+    name: Upload to Codecov
+    needs: coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Codecov checks who uploads with it, so no upload token is needed
+    steps:
+      # Codecov maps the report to the files of the commit. Nothing of it runs here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage-report
+          path: coverage-report
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          files: coverage-report/lcov.info
+          # Only the file named, not whatever else a search finds.
+          disable_search: true
+          fail_ci_if_error: true
+        # Codecov is a report on the side: the check above is what fails a pull request. Pull
+        # requests from forks get no OIDC token, so their upload fails.
+        continue-on-error: true

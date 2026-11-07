@@ -1,0 +1,30 @@
+name: Dependencies (cargo deny)
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    # New advisories also affect unchanged code, so check regularly.
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A new push to a pull request cancels the run for the previous one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-deny
+      - name: Check advisories, licenses, bans and sources (deny.toml)
+        run: make deny

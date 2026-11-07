@@ -1,0 +1,55 @@
+# Dependabot version updates, once a week. Each ecosystem's updates come in one pull request,
+# as the Cargo updates all change Cargo.lock and would conflict with each other, and all steps
+# of the CodeQL workflow must use the same version of codeql-action.
+# A new version is proposed only once it is a week old, so a release that turns out to be broken
+# or malicious is usually withdrawn before. Security updates for advisories come at once.
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns:
+          - "*"
+
+  # The fuzz targets have a workspace and a Cargo.lock of their own.
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      cargo-fuzz:
+        patterns:
+          - "*"
+
+  # Keeps the digest-pinned base image in docker/Dockerfile up to date.
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      docker:
+        patterns:
+          - "*"
+
+  # Keeps the SHA-pinned GitHub Actions in .github/workflows up to date.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"

@@ -1,0 +1,28 @@
+name: Rust test
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A new push to a pull request cancels the run for the previous one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  test_cargo:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - name: Run tests
+        run: make test ARGS=--locked

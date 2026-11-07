@@ -1,0 +1,16 @@
+[package]
+name = "puppybot"
+description = "PuppyBot, a Discord bot of the Purple Puppy Project: the program."
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+puppybot-core.workspace = true
+
+[lints]
+workspace = true

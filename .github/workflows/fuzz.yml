@@ -1,0 +1,54 @@
+name: Fuzzing
+on:
+  pull_request:
+    branches: ["main"]
+  schedule:
+    # Longer runs find what the short runs on pull requests miss.
+    - cron: '41 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds to run each fuzz target for"
+        default: "600"
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A new push to a pull request cancels the run for the previous one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  fuzz:
+    name: Fuzz each target
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly
+      - name: Install cargo-fuzz
+        # Pinned, as Dependabot doesn't update it: a new release is used only once someone
+        # looked at it. Bump deliberately.
+        run: cargo install --locked cargo-fuzz@0.13.2
+      - name: Run each fuzz target
+        env:
+          # 30 seconds on pull requests, 15 minutes on the weekly run.
+          FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '30' || inputs.seconds || '900' }}
+        run: |
+          # The input of a run started by hand goes into a command line, so only digits.
+          if ! [[ $FUZZ_SECONDS =~ ^[0-9]+$ ]]; then
+            echo "::error::The seconds per fuzz target must be a number, not '$FUZZ_SECONDS'."
+            exit 1
+          fi
+          make fuzz FUZZ_SECONDS="$FUZZ_SECONDS"
+      - name: Upload the input that failed
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
