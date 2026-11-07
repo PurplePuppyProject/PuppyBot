@@ -1,0 +1,27 @@
+# PuppyBot with Docker Compose, see the README's section Docker. In this directory, put the bot's
+# token into the file discord_token, readable only by the user of the image, 65532:
+#
+#   (umask 077 && read -rsp 'Discord token: ' token && printf '%s\n' "$token" > discord_token)
+#   sudo chown 65532:65532 discord_token
+#   docker compose up -d
+#
+# config.toml next to this file is the configuration.
+services:
+  puppybot:
+    image: ghcr.io/purplepuppyproject/puppybot:latest
+    restart: unless-stopped
+    # Nothing to write, no privileges: the program needs neither.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./config.toml:/etc/puppybot/config.toml:ro
+    secrets:
+      - discord_token
+
+secrets:
+  # In the container: /run/secrets/discord_token, see config.toml.
+  discord_token:
+    file: ./discord_token

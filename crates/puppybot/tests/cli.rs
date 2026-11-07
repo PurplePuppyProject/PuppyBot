@@ -44,9 +44,16 @@ fn a_wrong_command_line_fails() {
 }
 
 #[test]
-fn without_arguments_it_fails_until_the_bot_exists() {
+fn without_arguments_it_reads_the_configuration_where_the_image_has_it() {
+    // Unless the machine that runs the tests has a configuration there.
+    if std::path::Path::new("/etc/puppybot/config.toml").exists() {
+        return;
+    }
     let (status, out, err) = puppybot(&[]).unwrap();
-    assert_eq!(status, Some(1));
+    assert_eq!(status, Some(2));
     assert_eq!(out, "");
-    assert!(err.contains("doesn't exist yet"), "{err}");
+    assert!(
+        err.starts_with("puppybot: can't read the configuration /etc/puppybot/config.toml: "),
+        "{err}"
+    );
 }

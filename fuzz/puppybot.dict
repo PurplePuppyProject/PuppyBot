@@ -1,8 +1,28 @@
-# Tokens that help libFuzzer find valid input, see fuzz/README.md.
+# Tokens that help libFuzzer find valid input, see fuzz/README.md. One dictionary serves all
+# targets.
 
 # The options of the command line, and the separator of the arguments.
 "--version"
 "--help"
+"--config"
+"--config="
 "-V"
 "-h"
+"-c"
 "\x00"
+
+# The configuration file.
+"[discord]"
+"[log]"
+"token-file"
+"level"
+"format"
+"\"token\""
+"\"text\""
+"\"json\""
+"\"debug\""
+" = "
+"\x0a"
+
+# Files with secrets: line breaks at the end.
+"\x0d\x0a"

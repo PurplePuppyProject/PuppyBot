@@ -18,6 +18,16 @@ publish = false
 
 [workspace.dependencies]
 puppybot-core = { path = "crates/puppybot-core" }
+# Each with only the features PuppyBot uses.
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["macros", "rt", "signal"] }
+# Without the feature unbounded: the parser limits how deeply tables and arrays may nest.
+toml = { version = "1.2.1", default-features = false, features = ["parse", "serde", "std"] }
+# Without the macro #[instrument], whose async functions code coverage can't see into.
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "env-filter", "fmt", "json", "std", "tracing-log"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

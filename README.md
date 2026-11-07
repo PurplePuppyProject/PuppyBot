@@ -2,7 +2,7 @@
 
 A Discord bot of the Purple Puppy Project, written in Rust; a Signal bot may follow.
 
-**Status: planned, not built yet.** The repository has its CI, the release workflow and a skeleton of the program that knows only `--version` and `--help`. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
+**Status: being built.** So far the program reads its [configuration](#configuration) and the token of the bot, logs, and runs until a signal [stops](#running-and-stopping) it; it doesn't connect to Discord yet. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
 
 The project holds itself to:
 
@@ -26,6 +26,21 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   ghcr.io/purplepuppyproject/puppybot:edge --version
 ```
 
+### Docker Compose
+
+[docker/example](docker/example) runs the bot with [Docker Compose](https://docs.docker.com/compose/): `compose.yaml`, and the [configuration](#configuration) `config.toml`, which names the token file. In that directory:
+
+1. Put the token of the bot into the file `discord_token`, readable only by the user of the image. `read -s` keeps the token out of the shell's history and off the screen:
+   ```sh
+   (umask 077 && read -rsp 'Discord token: ' token && printf '%s\n' "$token" > discord_token)
+   sudo chown 65532:65532 discord_token
+   ```
+2. Start the bot with `docker compose up -d`. `docker compose logs` shows its log, `docker compose stop` stops it.
+
+The container runs read-only, without capabilities and without gaining privileges. Compose gives it the token as the secret `/run/secrets/discord_token`, a file, which unlike an environment variable doesn't show in `docker inspect`. CI runs the example with each change, see `docker/test-example.sh`.
+
+### Checking the Image
+
 To check that an image was built by this repository's workflow:
 
 ```sh
@@ -38,14 +53,38 @@ The binary carries the list of the crates it was built from ([cargo-auditable](h
 docker buildx imagetools inspect ghcr.io/purplepuppyproject/puppybot:edge --format '{{ json .SBOM }}'
 ```
 
+## Configuration
+
+PuppyBot reads its settings from a [TOML](https://toml.io) file: `/etc/puppybot/config.toml`, where the Docker image expects it, or the file that `--config` names, e.g. `puppybot --config bot.toml`.
+[docker/example/config.toml](docker/example/config.toml) has every setting:
+
+| Key | Default | What it sets |
+|---|---|---|
+| `[discord]` `token-file` | none, it must be given | The file with the token of the bot, e.g. a Docker secret |
+| `[log]` `level` | `info` | The most detailed level that is logged: `error`, `warn`, `info`, `debug` or `trace` |
+| `[log]` `format` | `text` | `text`, a line per message, or `json`, a JSON object per line, for log collectors |
+
+- **Checked:** unknown keys, e.g. typos, and invalid values are errors: PuppyBot names the line and exits with the status 2.
+- **Paths:** a relative path, e.g. `token-file = "token"`, is relative to the directory of the configuration file.
+- **Secrets** come only from files that the configuration names, never from the configuration itself, the command line or environment variables, and are never logged. The token file holds the token, with line breaks at its end or without; a character that isn't printable ASCII, e.g. a space, or a file larger than 4 KiB is an error. PuppyBot warns if users other than its owner may read or change the file.
+- **`RUST_LOG`**, e.g. `RUST_LOG=debug` or `RUST_LOG=info,puppybot=trace`, takes precedence over `[log]` `level`, to find a bug.
+
+## Running and Stopping
+
+PuppyBot runs until `SIGTERM`, which `docker stop` and service managers send, or `SIGINT`, from Ctrl+C, stops it. It logs to stderr, which Docker collects. Its exit status is:
+
+- 0 when a signal stopped it, or after `--version` or `--help`;
+- 1 if it can't run, e.g. as the token file is missing or holds no valid token;
+- 2 for a command line, a configuration file or a `RUST_LOG` that PuppyBot can't use.
+
 ## Project Layout
 
 | Path | What it holds |
 |---|---|
 | `crates/puppybot-core` | The bot's logic, its parsers and its texts in German and English, without Discord, storage or I/O |
-| `crates/puppybot` | The program: so far its command line; later the configuration, Discord, storage and feeds |
+| `crates/puppybot` | The program: its command line, configuration, secrets, logging and signals; later Discord, storage and feeds |
 | `fuzz/` | The fuzz targets, a workspace of its own, see [fuzz/README.md](fuzz/README.md) |
-| `docker/` | The Dockerfile, the script that prepares its build context, and the check of its SBOMs |
+| `docker/` | The Dockerfile, the script that prepares its build context, the check of its SBOMs, and the example of Docker Compose with its test |
 | `utils/` | `set-version.sh`, which prepares a release |
 | `docs/PLAN.md` | What was decided in planning, and the next steps |
 

@@ -23,11 +23,12 @@ What was decided in the planning of PuppyBot on 2026-11-07, with the versions of
 | TLS | rustls with ring as its cryptography | rustls 0.23.46, ring 0.17.14 | Less code than aws-lc-rs, the default of rustls, and a static musl build proven in vibe-portredirect. Accepted: no post-quantum key exchange, which ring lacks. The default features of rustls, and of the crates that use it, must be turned off; `deny.toml` bans aws-lc-rs. |
 | Storage | redb | 4.5.0 | Pure Rust, ACID transactions, one file in a volume, a backend in memory for tests. Queries over keys are built by hand. |
 | Secrets | Files that the configuration names, e.g. Docker or Compose secrets in `/run/secrets/` | | Not shown by `docker inspect`, `/proc/<pid>/environ` or crash reports. |
-| Configuration | A TOML file for the instance; the database for the settings of each server, changed with slash commands | | |
+| Configuration | A TOML file for the instance, `/etc/puppybot/config.toml` or the one `--config` names, with no settings from environment variables but `RUST_LOG`; the database for the settings of each server, changed with slash commands | serde 1.0.229, toml 1.2.1 | One place for every setting; unknown keys are errors. |
+| Logging | tracing, to stderr: a line of text, or a JSON object per line | tracing 0.1.44, tracing-subscriber 0.3.23 | Docker collects stderr; JSON for log collectors. |
 | Texts | Typed texts in `puppybot-core`: an enum per area, one exhaustive `match` per language | | A missing translation doesn't compile, nothing is parsed at run time, and tests reach every text. |
 | Dates and times | Discord timestamps (`<t:…>`) | | Discord shows them in the language and time zone of each reader. |
 
-Chosen in their steps, with the versions current then: the feed parser (e.g. feed-rs 3.0.0 or quick-xml 0.42.0), the HTTP client for feeds and Twitch (with rustls and ring), the compression of the gateway (preferably zlib-rs, which is pure Rust, instead of zstd, which is C), and logging (tracing).
+Chosen in their steps, with the versions current then: the feed parser (e.g. feed-rs 3.0.0 or quick-xml 0.42.0), the HTTP client for feeds and Twitch (with rustls and ring), and the compression of the gateway (preferably zlib-rs, which is pure Rust, instead of zstd, which is C).
 
 ## Structure
 
@@ -49,7 +50,7 @@ A Cargo workspace:
 
 One branch and pull request each, in this order:
 
-1. `feature/configuration`: the TOML configuration, secrets from files, logging, and how the program starts and stops (signals, exit statuses).
+1. `feature/configuration`, done: the TOML configuration, secrets from files, logging, how the program starts and stops (signals, exit statuses), and an example for Docker Compose.
 2. `feature/discord_connection`: twilight's gateway with the intents needed, reconnecting, the slash commands registered with German and English names and descriptions, and a first command, e.g. `/info`.
 3. `feature/storage`: redb for the settings of each server, with a version of the stored data for later changes.
 4. `feature/prefix_commands`: the platform-neutral parser of prefix commands in `puppybot-core`, with a fuzz target, and a prefix for each server.
@@ -60,5 +61,5 @@ One branch and pull request each, in this order:
 ## Open Questions
 
 - **Signal**, when it comes: signal-cli (GPL-3.0, Java, 0.14.9 on 2026-11-07) as a process of its own, spoken to over JSON-RPC, or presage (AGPL-3.0, Rust, only as git dependencies, which `deny.toml` would have to allow). Signal has no official bot API: the bot needs a phone number of its own, and releases of signal-cli older than three months may stop working.
-- **Operation:** logs as JSON or text, metrics, a health check for Docker (the image has no shell, so it would be a subcommand like `puppybot healthcheck`), an example Compose file, and backups of the redb file.
+- **Operation:** metrics, a health check for Docker (the image has no shell, so it would be a subcommand like `puppybot healthcheck`), and backups of the redb file. Decided already: logs as text, or as JSON if the configuration says so, and an example for Docker Compose.
 - **Codecov:** the upload fails until the repository is activated on codecov.io. The coverage check in CI doesn't depend on it.

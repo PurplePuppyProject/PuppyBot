@@ -245,10 +245,11 @@ jobs:
         # Each platform's SBOM must list the crates in the binary, which cargo auditable embedded.
         run: python3 docker/check-sbom.py image.tar puppybot puppybot-core
       - name: Test the image
-        # The image for amd64, started as restricted as the README's section Docker suggests.
+        # The image for amd64, started as restricted as the README's section Docker suggests,
+        # also by the name in docker/example/compose.yaml, for the step below.
         run: |
           docker buildx build --file docker/Dockerfile --platform linux/amd64 \
-            --tag puppybot:test --load context
+            --tag puppybot:test --tag ghcr.io/purplepuppyproject/puppybot:latest --load context
           user=$(docker image inspect --format '{{.Config.User}}' puppybot:test)
           if [ "$user" != 65532:65532 ]; then
             echo "::error::The image runs as '$user', not as the user without privileges, 65532:65532."
@@ -256,6 +257,9 @@ jobs:
           fi
           docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
             puppybot:test --version
+      - name: Test the example of Docker Compose
+        # Starts and stops the bot with the configuration and the secret of the example.
+        run: docker/test-example.sh
 
   publish-image:
     name: Publish the Docker image
