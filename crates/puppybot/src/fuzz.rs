@@ -10,6 +10,7 @@ use std::path::Path;
 
 use puppybot_core::dice::{self, Dice};
 use puppybot_core::i18n::Lang;
+use puppybot_core::poll::{self, Poll};
 use puppybot_core::text::Text;
 use puppybot_core::text_command;
 use secrecy::ExposeSecret;
@@ -116,6 +117,10 @@ pub fn interaction(data: &[u8]) {
             assert!(text_command::is_valid_prefix(prefix), "{prefix:?}");
             only_asker(&[Text::PrefixSet { prefix }, Text::StorageFailed])
         }
+        Request::Poll(poll) => {
+            check_poll(&poll);
+            only_asker(&[Text::PollPosted, Text::PollFailed])
+        }
         Request::Roll { dice, secret } => {
             let audience = if secret {
                 Audience::Asker
@@ -150,6 +155,49 @@ pub fn interaction(data: &[u8]) {
             data.content
                 .is_some_and(|content| content.chars().count() <= 2000)
         );
+    }
+}
+
+/// A poll as a text command writes it: the question and the answers, separated by `|`.
+///
+/// Checks beyond not crashing: a poll that [`Poll::parse`] reads keeps the limits of
+/// [`poll`], and has no `|` and no spaces around its question and answers.
+///
+/// # Panics
+///
+/// If a check fails, which is what the fuzz target looks for.
+pub fn poll(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let Ok(poll) = Poll::parse(text) else {
+        return;
+    };
+    check_poll(&poll);
+    let parts = std::iter::once(poll.question()).chain(poll.answers().iter().map(String::as_str));
+    for part in parts {
+        assert!(!part.contains(poll::SEPARATOR), "{text:?}");
+    }
+}
+
+/// Checks that `poll` keeps the limits of [`poll`], and has no spaces around its question and
+/// answers.
+///
+/// # Panics
+///
+/// If it doesn't.
+fn check_poll(poll: &Poll) {
+    let question = poll.question();
+    assert!((1..=poll::MAX_QUESTION).contains(&question.chars().count()));
+    assert!((poll::MIN_ANSWERS..=poll::MAX_ANSWERS).contains(&poll.answers().len()));
+    assert!((1..=poll::MAX_HOURS).contains(&poll.hours()));
+    let answers = poll.answers().iter().map(String::as_str);
+    for part in std::iter::once(question).chain(answers) {
+        assert_eq!(part, part.trim());
+        assert!(!part.is_empty() && part.chars().count() <= poll::MAX_QUESTION);
+    }
+    for answer in poll.answers() {
+        assert!(answer.chars().count() <= poll::MAX_ANSWER, "{answer:?}");
     }
 }
 
@@ -328,6 +376,22 @@ mod tests {
             seeds += 1;
         }
         assert_ne!(seeds, 0, "no seeds in {}", dir.display());
+    }
+
+    #[test]
+    fn poll_smoke_test() {
+        let inputs: [&[u8]; 7] = [
+            b"Pizza or pasta? | Pizza | Pasta",
+            b"Wer? |a|b|c|d|e|f|g|h|i|j",
+            b"Wer? |a|b|c|d|e|f|g|h|i|j|k",
+            b"Pizza?",
+            b" | a | b",
+            b"",
+            b"\xff",
+        ];
+        for input in inputs {
+            super::poll(input);
+        }
     }
 
     #[test]

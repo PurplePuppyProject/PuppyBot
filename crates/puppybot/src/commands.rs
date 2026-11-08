@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use puppybot_core::dice::{self, Dice};
 use puppybot_core::i18n::Lang;
+use puppybot_core::poll::{self, Poll};
 use puppybot_core::text::Text;
 use puppybot_core::text_command;
 use twilight_model::application::command::{Command, CommandType};
@@ -20,7 +21,7 @@ use twilight_model::http::interaction::InteractionResponse;
 use twilight_model::id::Id;
 use twilight_model::id::marker::GuildMarker;
 use twilight_util::builder::command::{
-    BooleanBuilder, CommandBuilder, StringBuilder, SubCommandBuilder,
+    BooleanBuilder, CommandBuilder, IntegerBuilder, StringBuilder, SubCommandBuilder,
 };
 use twilight_util::builder::interaction_response::ChannelMessageBuilder;
 
@@ -67,7 +68,57 @@ pub fn commands() -> Vec<Command> {
         .option(prefix)
         .build(),
         dice(),
+        poll(),
     ]
+}
+
+/// /poll, in German /umfrage: the question, 2 to 10 answers, the hours, and whether people may
+/// choose more than one answer. Discord wants the options that one must give first.
+fn poll() -> Command {
+    let mut command = CommandBuilder::new(
+        "poll",
+        Text::PollDescription.render(Lang::En),
+        CommandType::ChatInput,
+    )
+    .name_localizations([(GERMAN, "umfrage")])
+    .description_localizations([(GERMAN, Text::PollDescription.render(Lang::De))])
+    .contexts([InteractionContextType::Guild])
+    .option(
+        StringBuilder::new("question", Text::PollQuestionDescription.render(Lang::En))
+            .name_localizations([(GERMAN, "frage")])
+            .description_localizations([(GERMAN, Text::PollQuestionDescription.render(Lang::De))])
+            .max_length(u16::try_from(poll::MAX_QUESTION).unwrap_or(u16::MAX))
+            .required(true),
+    );
+    for number in 1..=poll::MAX_ANSWERS {
+        command = command.option(
+            StringBuilder::new(
+                format!("answer{number}"),
+                Text::PollAnswerDescription.render(Lang::En),
+            )
+            .name_localizations([(GERMAN, format!("antwort{number}"))])
+            .description_localizations([(GERMAN, Text::PollAnswerDescription.render(Lang::De))])
+            .max_length(u16::try_from(poll::MAX_ANSWER).unwrap_or(u16::MAX))
+            .required(number <= poll::MIN_ANSWERS),
+        );
+    }
+    command
+        .option(
+            IntegerBuilder::new("hours", Text::PollHoursDescription.render(Lang::En))
+                .name_localizations([(GERMAN, "stunden")])
+                .description_localizations([(GERMAN, Text::PollHoursDescription.render(Lang::De))])
+                .min_value(1)
+                .max_value(i64::from(poll::MAX_HOURS)),
+        )
+        .option(
+            BooleanBuilder::new("multiple", Text::PollMultipleDescription.render(Lang::En))
+                .name_localizations([(GERMAN, "mehrere")])
+                .description_localizations([(
+                    GERMAN,
+                    Text::PollMultipleDescription.render(Lang::De),
+                )]),
+        )
+        .build()
 }
 
 /// /dice, in German /würfel.
@@ -120,6 +171,8 @@ pub enum Request<'a> {
     /// A new prefix for the server, which [`text_command::is_valid_prefix`] accepts: /settings
     /// prefix with `to`.
     SetPrefix(Id<GuildMarker>, &'a str),
+    /// A poll to post in the channel: /poll.
+    Poll(Poll),
     /// A roll of `dice`, which only the asker sees if it is `secret`: /dice.
     Roll {
         /// What to roll.
@@ -168,6 +221,7 @@ pub fn request<'a>(
             "settings" if may_change_settings(interaction) => settings(command, guild),
             "settings" => Request::Answer(Text::NotAllowed),
             "dice" => roll(command),
+            "poll" => poll_request(command),
             _ => Request::Answer(Text::UnknownCommand),
         },
         _ => Request::Answer(Text::NotHere),
@@ -243,6 +297,40 @@ fn roll(command: &CommandData) -> Request<'static> {
     }
 }
 
+/// /poll: the question, the answers in the order of their numbers, the hours, and whether
+/// people may choose more than one answer. Any other option is of another version of the
+/// command.
+fn poll_request(command: &CommandData) -> Request<'static> {
+    let mut question = "";
+    let mut answers = Vec::new();
+    let mut hours = poll::DEFAULT_HOURS;
+    let mut multiple = false;
+    for option in &command.options {
+        let number = option
+            .name
+            .strip_prefix("answer")
+            .and_then(|number| number.parse::<u8>().ok());
+        match (option.name.as_str(), number, &option.value) {
+            ("question", _, CommandOptionValue::String(text)) => question = text,
+            (_, Some(number), CommandOptionValue::String(text)) => {
+                answers.push((number, text.as_str()));
+            }
+            // Beyond the limits of Discord's option: 0, which no poll has.
+            ("hours", _, CommandOptionValue::Integer(value)) => {
+                hours = u16::try_from(*value).unwrap_or(0);
+            }
+            ("multiple", _, CommandOptionValue::Boolean(value)) => multiple = *value,
+            _ => return Request::Answer(Text::UnknownCommand),
+        }
+    }
+    answers.sort_by_key(|&(number, _)| number);
+    let answers: Vec<&str> = answers.into_iter().map(|(_, text)| text).collect();
+    match Poll::new(question, &answers, hours, multiple) {
+        Ok(poll) => Request::Poll(poll),
+        Err(error) => Request::Answer(Text::poll_error(error)),
+    }
+}
+
 /// The answer with `content` for `audience`, which mentions nobody.
 #[must_use]
 pub fn response(content: String, audience: Audience) -> InteractionResponse {
@@ -260,6 +348,7 @@ pub fn response(content: String, audience: Audience) -> InteractionResponse {
 pub(crate) mod tests {
     use twilight_model::application::command::{
         CommandOptionChoice, CommandOptionChoiceValue, CommandOptionType,
+        CommandOptionValue as Limit,
     };
     use twilight_model::http::interaction::InteractionResponseType;
 
@@ -525,6 +614,54 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn polls() {
+        let poll = |options: &str| command("poll", options, "de", 0);
+        // The answers in the order of their numbers, whatever the order of the options.
+        let options = r#"[{"name": "question", "type": 3, "value": "Pizza?"},
+            {"name": "answer10", "type": 3, "value": "Zehn"},
+            {"name": "answer2", "type": 3, "value": "Nein"},
+            {"name": "answer1", "type": 3, "value": "Ja"},
+            {"name": "hours", "type": 4, "value": 48},
+            {"name": "multiple", "type": 5, "value": true}]"#;
+        assert_eq!(
+            asked(&poll(options)).0,
+            Request::Poll(Poll::new("Pizza?", &["Ja", "Nein", "Zehn"], 48, true).unwrap())
+        );
+        let options = r#"[{"name": "question", "type": 3, "value": "Pizza?"},
+            {"name": "answer1", "type": 3, "value": "Ja"},
+            {"name": "answer2", "type": 3, "value": "Nein"}]"#;
+        assert_eq!(
+            asked(&poll(options)).0,
+            Request::Poll(Poll::parse("Pizza? | Ja | Nein").unwrap())
+        );
+        for (options, answer) in [
+            (
+                r#"[{"name": "question", "type": 3, "value": "?"}, {"name": "answer1", "type": 3, "value": "Ja"}]"#,
+                Text::PollInvalid,
+            ),
+            (
+                r#"[{"name": "question", "type": 3, "value": "?"}, {"name": "answer1", "type": 3, "value": "a"},
+                {"name": "answer2", "type": 3, "value": "b"}, {"name": "hours", "type": 4, "value": 1000000}]"#,
+                Text::PollTooLarge,
+            ),
+            (
+                r#"[{"name": "answerx", "type": 3, "value": "a"}]"#,
+                Text::UnknownCommand,
+            ),
+            (
+                r#"[{"name": "hours", "type": 3, "value": "24"}]"#,
+                Text::UnknownCommand,
+            ),
+        ] {
+            assert_eq!(
+                asked(&poll(options)).0,
+                Request::Answer(answer),
+                "{options}"
+            );
+        }
+    }
+
+    #[test]
     fn answers_for_everyone_in_the_channel() {
         let data = response("4".to_owned(), Audience::Everyone).data.unwrap();
         assert_eq!(data.flags, None);
@@ -548,19 +685,35 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_commands_in_both_languages() {
+    fn the_options_of_poll() {
         let commands = commands();
-        let names: Vec<&str> = commands
+        // /poll, in German /umfrage: the options one must give first.
+        let poll = &commands[3];
+        assert_eq!(poll.name, "poll");
+        let options: Vec<_> = poll
+            .options
             .iter()
-            .map(|command| command.name.as_str())
+            .map(|option| (option.name.as_str(), option.required))
             .collect();
-        assert_eq!(names, ["info", "settings", "dice"]);
-        for command in &commands {
-            let german = &command.description_localizations.as_ref().unwrap()["de"];
-            assert_ne!(&command.description, german);
-            assert_eq!(command.contexts, Some(vec![InteractionContextType::Guild]));
+        let mut expected = vec![("question", Some(true))];
+        let answers: Vec<String> = (1..=10).map(|number| format!("answer{number}")).collect();
+        for (index, answer) in answers.iter().enumerate() {
+            expected.push((answer.as_str(), Some(index < 2)));
         }
-        let (info, settings, dice) = (&commands[0], &commands[1], &commands[2]);
+        expected.extend([("hours", None), ("multiple", None)]);
+        assert_eq!(options, expected);
+        let hours = &poll.options[11];
+        assert_eq!(
+            (hours.min_value, hours.max_value),
+            (Some(Limit::Integer(1)), Some(Limit::Integer(168)))
+        );
+    }
+
+    #[test]
+    fn the_options_of_dice() {
+        let commands = commands();
+        let dice = &commands[2];
+        assert_eq!(dice.name, "dice");
         // /dice, for everyone, in German /würfel.
         assert_eq!(dice.default_member_permissions, None);
         let german = |names: &Option<std::collections::HashMap<String, String>>| {
@@ -599,6 +752,22 @@ pub(crate) mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn the_commands_in_both_languages() {
+        let commands = commands();
+        let names: Vec<&str> = commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect();
+        assert_eq!(names, ["info", "settings", "dice", "poll"]);
+        for command in &commands {
+            let german = &command.description_localizations.as_ref().unwrap()["de"];
+            assert_ne!(&command.description, german);
+            assert_eq!(command.contexts, Some(vec![InteractionContextType::Guild]));
+        }
+        let (info, settings) = (&commands[0], &commands[1]);
         assert_eq!(
             info.description,
             "Shows what PuppyBot is and which version runs"

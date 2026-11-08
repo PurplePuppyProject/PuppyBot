@@ -216,6 +216,7 @@ pub fn slash(name: &str, options: &str, locale: &str, permissions: u64) -> Send 
             r#"{{"id": "1200000000000000006", "application_id": "{APPLICATION}", "type": 2,
             "token": "command-token", "version": 1, "locale": "{locale}",
             "guild_id": "{GUILD}", "attachment_size_limit": 26214400,
+            "channel": {{"id": "{CHANNEL}", "type": 0, "guild_id": "{GUILD}"}},
             "authorizing_integration_owners": {{}}, "entitlements": [],
             "member": {{"deaf": false, "mute": false, "flags": 0, "roles": [], "joined_at": null,
                 "permissions": "{permissions}", "user": {{"id": "1400000000000000005",

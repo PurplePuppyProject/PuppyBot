@@ -140,13 +140,14 @@ fn failing_requests_are_warnings() {
                 guild_create(OTHER_GUILD),
                 interaction(2, "info", "en-US", GUILD),
                 message(1, "!info", GUILD, false),
+                message(2, "!poll Pizza? | Ja | Nein", GUILD, false),
             ]
         },
         Some(400),
     );
     let (_dir, mut bot) = start(&discord);
     // The last of the script.
-    bot.wait_for("can't answer a text command");
+    bot.wait_for("can't post a poll");
     let (status, log) = bot.stop_with("TERM");
     assert_eq!(status, Some(0), "{log}");
     for warning in [
@@ -155,6 +156,7 @@ fn failing_requests_are_warnings() {
         "can't leave the server",
         "can't answer a command",
         "can't answer a text command",
+        "can't post a poll",
     ] {
         assert!(log.contains(warning), "{warning}: {log}");
     }
@@ -451,5 +453,73 @@ fn dice_in_the_channel_or_secret() {
             .contains("PuppyBot rolls expressions like `2d6+3`"),
         "{}",
         texts[1].body
+    );
+}
+
+#[test]
+fn polls_in_the_channel() {
+    let options = r#"[{"name": "question", "type": 3, "value": "Pizza oder Pasta?"},
+        {"name": "answer2", "type": 3, "value": "Pasta"},
+        {"name": "answer1", "type": 3, "value": "Pizza"},
+        {"name": "hours", "type": 4, "value": 48},
+        {"name": "multiple", "type": 5, "value": true}]"#;
+    let discord = FakeDiscord::start(
+        move |url| {
+            vec![
+                ready(url),
+                slash("poll", options, "de", 0),
+                message(1, "!umfrage Wer kommt? | Ich | Du", GUILD, false),
+                message(2, "!poll Wer kommt?", GUILD, false),
+            ]
+        },
+        None,
+    );
+    let (_dir, bot) = start(&discord);
+    let posted = requests_to(&discord, CHANNEL_MESSAGES, 3);
+    let answers = requests_to(&discord, COMMAND_ANSWER, 1);
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert_eq!(
+        (posted.len(), answers.len()),
+        (3, 1),
+        "{posted:#?} {answers:#?}"
+    );
+
+    // /poll: the poll in the channel, its answers in their order, and a word to the asker.
+    let poll = &posted[0].body;
+    for part in [
+        r#""question":{"text":"Pizza oder Pasta?"}"#,
+        r#""answers":[{"poll_media":{"text":"Pizza"}},{"poll_media":{"text":"Pasta"}}]"#,
+        r#""duration":48"#,
+        r#""allow_multiselect":true"#,
+        r#""allowed_mentions":{"parse":[]}"#,
+    ] {
+        assert!(poll.contains(part), "{part}: {poll}");
+    }
+    assert!(!poll.contains("message_reference"), "{poll}");
+    assert!(
+        answers[0]
+            .body
+            .contains("PuppyBot hat die Umfrage gepostet."),
+        "{}",
+        answers[0].body
+    );
+    assert!(
+        answers[0].body.contains(r#""flags":64"#),
+        "{}",
+        answers[0].body
+    );
+
+    // As a text command: for 24 hours, as the answer to the message.
+    let poll = &posted[1].body;
+    assert!(poll.contains(r#""duration":24"#), "{poll}");
+    assert!(poll.contains(r#""allow_multiselect":false"#), "{poll}");
+    assert!(poll.contains(r#""message_id":"1""#), "{poll}");
+    assert!(
+        posted[2]
+            .body
+            .contains("A poll needs a question and 2 to 10 answers"),
+        "{}",
+        posted[2].body
     );
 }

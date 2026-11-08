@@ -34,11 +34,13 @@ pub enum TextCommand {
     Help,
     /// Dice, see [`crate::dice`].
     Dice,
+    /// A poll, see [`crate::poll`].
+    Poll,
 }
 
 impl TextCommand {
     /// All text commands.
-    pub const ALL: [Self; 3] = [Self::Info, Self::Help, Self::Dice];
+    pub const ALL: [Self; 4] = [Self::Info, Self::Help, Self::Dice, Self::Poll];
 
     /// The names of the command: in English, and in German if it differs.
     #[must_use]
@@ -47,6 +49,7 @@ impl TextCommand {
             Self::Info => &["info"],
             Self::Help => &["help", "hilfe"],
             Self::Dice => &["dice", "roll", "würfel"],
+            Self::Poll => &["poll", "umfrage"],
         }
     }
 

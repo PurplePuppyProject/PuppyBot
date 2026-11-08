@@ -45,6 +45,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "poll"
+path = "fuzz_targets/poll.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "text_command"
 path = "fuzz_targets/text_command.rs"
 test = false
