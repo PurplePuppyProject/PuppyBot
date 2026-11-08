@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::time::Duration;
 
+use puppybot_core::dice::Dice;
 use puppybot_core::i18n::Lang;
 use puppybot_core::text::Text;
 use puppybot_core::text_command::{self, TextCommand};
@@ -21,7 +22,7 @@ use twilight_model::gateway::payload::incoming::Ready;
 use twilight_model::id::Id;
 use twilight_model::id::marker::GuildMarker;
 
-use crate::commands::{self, Request};
+use crate::commands::{self, Audience, Request};
 use crate::config::DiscordConfig;
 use crate::shutdown::{Signals, Stop};
 use crate::storage::Settings;
@@ -120,6 +121,7 @@ impl Discord {
                 guilds: config.guilds.iter().map(|&guild| Id::from(guild)).collect(),
                 settings,
                 mentions: OnceCell::new(),
+                die: crate::random::die,
             },
         }
     }
@@ -167,6 +169,8 @@ struct Bot {
     settings: Box<dyn Settings>,
     /// How messages mention PuppyBot, once Discord said who it is.
     mentions: OnceCell<[String; 2]>,
+    /// A die with so many sides, see [`crate::random::die`], or another one in tests.
+    die: fn(u32) -> Option<u32>,
 }
 
 impl Bot {
@@ -221,7 +225,8 @@ impl Bot {
         let Some(asked) = commands::request(interaction, &self.guilds) else {
             return;
         };
-        let response = commands::response(self.execute(asked.request, asked.lang));
+        let (content, audience) = self.execute(asked.request, asked.lang);
+        let response = commands::response(content, audience);
         let answer = self.http.interaction(interaction.application_id);
         if let Err(error) = answer
             .create_response(interaction.id, &interaction.token, &response)
@@ -232,8 +237,16 @@ impl Bot {
     }
 
     /// Does what `request` asks for, and returns the answer, in `lang`.
-    fn execute(&self, request: Request<'_>, lang: Lang) -> String {
-        match request {
+    fn execute(&self, request: Request<'_>, lang: Lang) -> (String, Audience) {
+        let content = match request {
+            Request::Roll { dice, secret } => {
+                let audience = if secret {
+                    Audience::Asker
+                } else {
+                    Audience::Everyone
+                };
+                return (self.rolled(&dice, lang), audience);
+            }
             Request::Answer(text) => text.render(lang),
             Request::ShowLanguage(guild) => match self.settings.language(guild) {
                 Ok(chosen) => Text::LanguageIs { chosen }.render(lang),
@@ -276,6 +289,22 @@ impl Bot {
                     Text::StorageFailed.render(lang)
                 }
             },
+        };
+        (content, Audience::Asker)
+    }
+
+    /// Rolls `dice`, and returns the answer, in `lang`.
+    fn rolled(&self, dice: &Dice, lang: Lang) -> String {
+        let mut side = self.die;
+        if let Some(roll) = dice.roll(&mut side) {
+            Text::Rolled {
+                dice: &dice.to_string(),
+                roll: &roll.to_string(),
+            }
+            .render(lang)
+        } else {
+            tracing::warn!("can't roll dice: the system has no randomness");
+            Text::DiceFailed.render(lang)
         }
     }
 
@@ -295,16 +324,22 @@ impl Bot {
         let mentions = self.mentions.get().map_or(Vec::new(), |mentions| {
             mentions.iter().map(String::as_str).collect()
         });
-        let Some((command, _)) = text_command::parse(&message.content, &prefix, &mentions) else {
+        let Some((command, arguments)) = text_command::parse(&message.content, &prefix, &mentions)
+        else {
             return;
         };
-        let text = match command {
+        let lang = self.language(guild);
+        let content = match command {
             TextCommand::Info => Text::Info {
                 version: crate::VERSION,
+            }
+            .render(lang),
+            TextCommand::Help => Text::Help { prefix: &prefix }.render(lang),
+            TextCommand::Dice => match Dice::parse_or_d6(arguments) {
+                Ok(dice) => self.rolled(&dice, lang),
+                Err(error) => Text::dice_error(error).render(lang),
             },
-            TextCommand::Help => Text::Help { prefix: &prefix },
         };
-        let content = text.render(self.language(guild));
         let nobody = AllowedMentions::default();
         let reply = self
             .http
@@ -398,6 +433,8 @@ mod tests {
             guilds: BTreeSet::from([Id::new(GUILD)]),
             settings,
             mentions: OnceCell::new(),
+            // Every die at its most.
+            die: Some,
         }
     }
 
@@ -439,7 +476,7 @@ mod tests {
         in_runtime(async {
             let bot = bot(Box::new(Storage::in_memory()));
             let guild = Id::new(GUILD);
-            let en = |text: Text<'_>| text.render(Lang::En);
+            let en = |text: Text<'_>| (text.render(Lang::En), Audience::Asker);
             assert_eq!(
                 bot.execute(Request::ShowLanguage(guild), Lang::En),
                 en(Text::LanguageIs { chosen: None })
@@ -458,7 +495,7 @@ mod tests {
             assert_eq!(bot.language(guild), Lang::De);
             assert_eq!(
                 bot.execute(Request::Answer(Text::NotHere), Lang::De),
-                Text::NotHere.render(Lang::De)
+                (Text::NotHere.render(Lang::De), Audience::Asker)
             );
         });
     }
@@ -468,7 +505,7 @@ mod tests {
         in_runtime(async {
             let bot = bot(Box::new(Storage::in_memory()));
             let guild = Id::new(GUILD);
-            let en = |text: Text<'_>| text.render(Lang::En);
+            let en = |text: Text<'_>| (text.render(Lang::En), Audience::Asker);
             assert_eq!(
                 bot.execute(Request::ShowPrefix(guild), Lang::En),
                 en(Text::PrefixIs { chosen: None })
@@ -489,6 +526,31 @@ mod tests {
     }
 
     #[test]
+    fn dice_for_everyone_or_secret() {
+        in_runtime(async {
+            let bot = bot(Box::new(Storage::in_memory()));
+            let roll = |secret| Request::Roll {
+                dice: Dice::parse("2d6+3").unwrap(),
+                secret,
+            };
+            let rolled = "`2d6+3` gives [6, 6] + 3 = **15**".to_owned();
+            assert_eq!(
+                bot.execute(roll(false), Lang::En),
+                (rolled.clone(), Audience::Everyone)
+            );
+            assert_eq!(bot.execute(roll(true), Lang::En), (rolled, Audience::Asker));
+
+            // Without randomness, no roll.
+            let mut bot = bot;
+            bot.die = |_| None;
+            assert_eq!(
+                bot.execute(roll(false), Lang::De),
+                (Text::DiceFailed.render(Lang::De), Audience::Everyone)
+            );
+        });
+    }
+
+    #[test]
     fn settings_that_fail() {
         in_runtime(async {
             let bot = bot(Box::new(Broken));
@@ -500,8 +562,8 @@ mod tests {
                 Request::SetPrefix(guild, "?"),
             ] {
                 assert_eq!(
-                    bot.execute(request, Lang::De),
-                    Text::StorageFailed.render(Lang::De),
+                    bot.execute(request.clone(), Lang::De),
+                    (Text::StorageFailed.render(Lang::De), Audience::Asker),
                     "{request:?}"
                 );
             }

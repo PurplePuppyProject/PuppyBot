@@ -8,6 +8,7 @@ use std::io;
 use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 
+use puppybot_core::dice::{self, Dice};
 use puppybot_core::i18n::Lang;
 use puppybot_core::text::Text;
 use puppybot_core::text_command;
@@ -17,7 +18,7 @@ use twilight_model::channel::message::{AllowedMentions, MessageFlags};
 use twilight_model::id::Id;
 
 use crate::cli;
-use crate::commands::Request;
+use crate::commands::{Audience, Request};
 
 /// The command line, as arguments separated by NUL bytes, which arguments can't hold.
 ///
@@ -85,39 +86,112 @@ pub fn interaction(data: &[u8]) {
     let Some(asked) = crate::commands::request(&interaction, &guilds) else {
         return;
     };
+    let lang = asked.lang;
+    let only_asker = |texts: &[Text<'_>]| {
+        texts
+            .iter()
+            .map(|text| (text.render(lang), Audience::Asker))
+            .collect::<Vec<_>>()
+    };
     let answers = match asked.request {
-        Request::Answer(text) => vec![text],
-        Request::ShowLanguage(_) => vec![
+        Request::Answer(text) => only_asker(&[text]),
+        Request::ShowLanguage(_) => only_asker(&[
             Text::LanguageIs { chosen: None },
             Text::LanguageIs {
                 chosen: Some(Lang::De),
             },
             Text::StorageFailed,
-        ],
-        Request::SetLanguage(_, lang) => vec![Text::LanguageSet { lang }, Text::StorageFailed],
-        Request::ShowPrefix(_) => vec![
+        ]),
+        Request::SetLanguage(_, new) => {
+            only_asker(&[Text::LanguageSet { lang: new }, Text::StorageFailed])
+        }
+        Request::ShowPrefix(_) => only_asker(&[
             Text::PrefixIs { chosen: None },
             Text::PrefixIs {
                 chosen: Some("pb!"),
             },
             Text::StorageFailed,
-        ],
+        ]),
         Request::SetPrefix(_, prefix) => {
             assert!(text_command::is_valid_prefix(prefix), "{prefix:?}");
-            vec![Text::PrefixSet { prefix }, Text::StorageFailed]
+            only_asker(&[Text::PrefixSet { prefix }, Text::StorageFailed])
+        }
+        Request::Roll { dice, secret } => {
+            let audience = if secret {
+                Audience::Asker
+            } else {
+                Audience::Everyone
+            };
+            // Every die at its most, which writes the longest numbers.
+            let roll = dice
+                .roll(&mut |sides| Some(sides))
+                .map(|roll| roll.to_string())
+                .unwrap_or_default();
+            assert!(!roll.is_empty(), "no roll of {dice}");
+            let rolled = Text::Rolled {
+                dice: &dice.to_string(),
+                roll: &roll,
+            };
+            vec![
+                (rolled.render(lang), audience),
+                (Text::DiceFailed.render(lang), audience),
+            ]
         }
     };
-    for text in answers {
+    for (content, audience) in answers {
         // An answer without a message has none of these.
-        let data = crate::commands::response(text.render(asked.lang))
+        let data = crate::commands::response(content, audience)
             .data
             .unwrap_or_default();
-        assert_eq!(data.flags, Some(MessageFlags::EPHEMERAL), "{data:?}");
+        let ephemeral = (audience == Audience::Asker).then_some(MessageFlags::EPHEMERAL);
+        assert_eq!(data.flags, ephemeral, "{data:?}");
         assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
         assert!(
             data.content
                 .is_some_and(|content| content.chars().count() <= 2000)
         );
+    }
+}
+
+/// An expression of dice.
+///
+/// Checks beyond not crashing: an expression that [`Dice::parse`] accepts rolls at most
+/// [`dice::MAX_DICE`] dice, reads the same when written again, if that is short enough, and
+/// its roll, with every die at its most or its least, fits into a message of Discord.
+///
+/// # Panics
+///
+/// If a check fails, which is what the fuzz target looks for.
+pub fn dice(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let Ok(dice) = Dice::parse(text) else {
+        return;
+    };
+    let written = dice.to_string();
+    if written.len() <= usize::from(dice::MAX_LENGTH) {
+        assert_eq!(Dice::parse(&written).as_ref(), Ok(&dice), "{text:?}");
+    }
+    let most: fn(u32) -> Option<u32> = Some;
+    let least: fn(u32) -> Option<u32> = |_| Some(1);
+    for side in [most, least] {
+        let mut rolled = 0;
+        let roll = dice
+            .roll(&mut |sides| {
+                rolled += 1;
+                side(sides)
+            })
+            .map(|roll| roll.to_string())
+            .unwrap_or_default();
+        assert!(rolled <= dice::MAX_DICE, "{text:?}");
+        let answer = Text::Rolled {
+            dice: &written,
+            roll: &roll,
+        };
+        for lang in Lang::ALL {
+            assert!(answer.render(lang).chars().count() <= 2000, "{text:?}");
+        }
     }
 }
 
@@ -254,6 +328,27 @@ mod tests {
             seeds += 1;
         }
         assert_ne!(seeds, 0, "no seeds in {}", dir.display());
+    }
+
+    #[test]
+    fn dice_smoke_test() {
+        let inputs: [&[u8]; 9] = [
+            b"2d6+3",
+            b"4d6kh3",
+            b"100d1000",
+            b"d20 - 1d4 + 5",
+            b"01d06kl1",
+            b"1000000",
+            b"2d",
+            b"101d6",
+            b"\xff",
+        ];
+        for input in inputs {
+            super::dice(input);
+        }
+        // 99 characters, which `kh` instead of `k` makes 119 when written again: too long to
+        // read again, but rolled.
+        super::dice(["d6k1"; 20].join("+").as_bytes());
     }
 
     #[test]

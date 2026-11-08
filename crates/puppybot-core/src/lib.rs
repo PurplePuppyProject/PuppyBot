@@ -6,6 +6,7 @@
 //! connects it to Discord, storage and the network. The dependencies of this crate are only crates
 //! without I/O; `make lint` checks that.
 
+pub mod dice;
 pub mod i18n;
 pub mod text;
 pub mod text_command;

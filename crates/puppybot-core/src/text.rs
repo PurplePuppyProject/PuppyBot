@@ -67,12 +67,40 @@ pub enum Text<'a> {
         /// The prefix of the server.
         prefix: &'a str,
     },
+    /// The description of /dice.
+    DiceDescription,
+    /// The description of the option `expression` of /dice.
+    DiceExpressionDescription,
+    /// The description of the option `secret` of /dice.
+    DiceSecretDescription,
+    /// A roll of dice.
+    Rolled {
+        /// The expression, as [`crate::dice::Dice`] writes it, e.g. `2d6+3`.
+        dice: &'a str,
+        /// What it showed, as [`crate::dice::Roll`] writes it, e.g. `[4, 2] + 3 = **9**`.
+        roll: &'a str,
+    },
+    /// The answer to an expression of dice that isn't one.
+    DiceInvalid,
+    /// The answer to an expression of dice beyond the limits of [`crate::dice`].
+    DiceTooLarge,
+    /// The answer when PuppyBot can't roll, as the system has no randomness.
+    DiceFailed,
 }
 
 impl Text<'_> {
+    /// The answer to an expression of dice that PuppyBot doesn't roll, as of `error`.
+    #[must_use]
+    pub const fn dice_error(error: crate::dice::Error) -> Text<'static> {
+        match error {
+            crate::dice::Error::Invalid => Text::DiceInvalid,
+            crate::dice::Error::TooLarge => Text::DiceTooLarge,
+        }
+    }
+
     /// All texts, with an example for each value they hold, e.g. for tests that each exists in
     /// every language.
-    pub const ALL: [Text<'static>; 22] = [
+    pub const ALL: [Text<'static>; 29] = [
         Text::InfoDescription,
         Text::Info { version: "1.2.3" },
         Text::UnknownCommand,
@@ -99,16 +127,29 @@ impl Text<'_> {
         Text::PrefixSet { prefix: "pb!" },
         Text::PrefixInvalid,
         Text::Help { prefix: "!" },
+        Text::DiceDescription,
+        Text::DiceExpressionDescription,
+        Text::DiceSecretDescription,
+        Text::Rolled {
+            dice: "2d6+3",
+            roll: "[4, 2] + 3 = **9**",
+        },
+        Text::DiceInvalid,
+        Text::DiceTooLarge,
+        Text::DiceFailed,
     ];
 
     /// The descriptions in the list of commands, which Discord limits to 100 characters.
-    pub const DESCRIPTIONS: [Text<'static>; 6] = [
+    pub const DESCRIPTIONS: [Text<'static>; 9] = [
         Text::InfoDescription,
         Text::SettingsDescription,
         Text::LanguageDescription,
         Text::LanguageToDescription,
         Text::PrefixDescription,
         Text::PrefixToDescription,
+        Text::DiceDescription,
+        Text::DiceExpressionDescription,
+        Text::DiceSecretDescription,
     ];
 
     /// The text in `lang`.
@@ -191,9 +232,27 @@ impl Text<'_> {
             Self::Help { prefix } => format!(
                 "Die Textbefehle von PuppyBot beginnen hier mit `{prefix}` oder mit einer Erwähnung von PuppyBot:\n\
                  - `{prefix}info`: was PuppyBot ist und welche Version läuft\n\
+                 - `{prefix}würfel 2W6+3`: würfelt, z. B. auch `W20` oder `4W6kh3`\n\
                  - `{prefix}hilfe`: diese Befehle\n\
                  Seine Slash-Befehle, z. B. `/info`, stehen in Discords Liste der Befehle."
             ),
+            Self::DiceDescription => "Würfelt, z. B. 2W6+3, W20 oder 4W6kh3".to_owned(),
+            Self::DiceExpressionDescription => {
+                "Was gewürfelt wird, z. B. 2W6+3; ohne es ein Würfel mit sechs Seiten".to_owned()
+            }
+            Self::DiceSecretDescription => "Nur du siehst das Ergebnis".to_owned(),
+            Self::Rolled { dice, roll } => format!("`{dice}` ergibt {roll}"),
+            Self::DiceInvalid => {
+                "PuppyBot würfelt Ausdrücke wie `2W6+3` oder `2d6+3`: die Zahl der Würfel, W oder d, und ihre Seiten, z. B. `W20`, dazu plus oder minus Zahlen oder weitere Würfel. `4W6kh3` zählt die höchsten 3 von 4 Würfeln, `kl` die niedrigsten."
+                    .to_owned()
+            }
+            Self::DiceTooLarge => {
+                "PuppyBot würfelt höchstens 100 Würfel auf einmal, mit bis zu 1000 Seiten, in höchstens 20 Teilen und mit Zahlen bis 1000000."
+                    .to_owned()
+            }
+            Self::DiceFailed => {
+                "PuppyBot kann gerade nicht würfeln. Bitte später noch einmal versuchen.".to_owned()
+            }
         }
     }
 
@@ -263,9 +322,27 @@ impl Text<'_> {
             Self::Help { prefix } => format!(
                 "PuppyBot's text commands start with `{prefix}` here, or with a mention of PuppyBot:\n\
                  - `{prefix}info`: what PuppyBot is, and which version runs\n\
+                 - `{prefix}dice 2d6+3`: rolls dice, e.g. also `d20` or `4d6kh3`\n\
                  - `{prefix}help`: these commands\n\
                  Its slash commands, e.g. `/info`, are in Discord's list of commands."
             ),
+            Self::DiceDescription => "Rolls dice, e.g. 2d6+3, d20 or 4d6kh3".to_owned(),
+            Self::DiceExpressionDescription => {
+                "What to roll, e.g. 2d6+3; without it, one die with six sides".to_owned()
+            }
+            Self::DiceSecretDescription => "Only you see the result".to_owned(),
+            Self::Rolled { dice, roll } => format!("`{dice}` gives {roll}"),
+            Self::DiceInvalid => {
+                "PuppyBot rolls expressions like `2d6+3`: the number of dice, d, and their sides, e.g. `d20`, plus or minus numbers or more dice. `4d6kh3` counts the highest 3 of 4 dice, `kl` the lowest."
+                    .to_owned()
+            }
+            Self::DiceTooLarge => {
+                "PuppyBot rolls at most 100 dice at once, with up to 1000 sides, in at most 20 parts, and numbers up to 1000000."
+                    .to_owned()
+            }
+            Self::DiceFailed => {
+                "PuppyBot can't roll right now. Please try again later.".to_owned()
+            }
         }
     }
 }
@@ -306,6 +383,7 @@ mod tests {
             help.render(Lang::En),
             "PuppyBot's text commands start with `?` here, or with a mention of PuppyBot:\n\
              - `?info`: what PuppyBot is, and which version runs\n\
+             - `?dice 2d6+3`: rolls dice, e.g. also `d20` or `4d6kh3`\n\
              - `?help`: these commands\n\
              Its slash commands, e.g. `/info`, are in Discord's list of commands."
         );

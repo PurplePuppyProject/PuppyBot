@@ -207,31 +207,37 @@ pub fn guild_create(guild: u64) -> Send {
     )
 }
 
-/// /settings `subcommand` on [`GUILD`], with `to` if given, by someone with the locale
-/// `locale` and the permissions `permissions`. PuppyBot answers it at [`SETTINGS_ANSWER`].
-pub fn settings(subcommand: &str, to: Option<&str>, locale: &str, permissions: u64) -> Send {
-    let to = to.map_or_else(String::new, |value| {
-        format!(r#"{{"name": "to", "type": 3, "value": "{value}"}}"#)
-    });
+/// The slash command `name` with `options`, as JSON, on [`GUILD`], by someone with the locale
+/// `locale` and the permissions `permissions`. PuppyBot answers it at [`COMMAND_ANSWER`].
+pub fn slash(name: &str, options: &str, locale: &str, permissions: u64) -> Send {
     Send::Dispatch(
         "INTERACTION_CREATE",
         format!(
             r#"{{"id": "1200000000000000006", "application_id": "{APPLICATION}", "type": 2,
-            "token": "settings-token", "version": 1, "locale": "{locale}",
+            "token": "command-token", "version": 1, "locale": "{locale}",
             "guild_id": "{GUILD}", "attachment_size_limit": 26214400,
             "authorizing_integration_owners": {{}}, "entitlements": [],
             "member": {{"deaf": false, "mute": false, "flags": 0, "roles": [], "joined_at": null,
                 "permissions": "{permissions}", "user": {{"id": "1400000000000000005",
                 "username": "puppy", "discriminator": "0", "avatar": null}}}},
-            "data": {{"id": "1200000000000000007", "name": "settings", "type": 1,
-                "options": [{{"name": "{subcommand}", "type": 1, "options": [{to}]}}]}}}}"#
+            "data": {{"id": "1200000000000000007", "name": "{name}", "type": 1,
+                "options": {options}}}}}"#
         ),
     )
 }
 
-/// Where PuppyBot answers [`settings`].
-pub const SETTINGS_ANSWER: &str =
-    "POST /api/v10/interactions/1200000000000000006/settings-token/callback";
+/// /settings `subcommand`, with `to` if given, see [`slash`].
+pub fn settings(subcommand: &str, to: Option<&str>, locale: &str, permissions: u64) -> Send {
+    let to = to.map_or_else(String::new, |value| {
+        format!(r#"{{"name": "to", "type": 3, "value": "{value}"}}"#)
+    });
+    let options = format!(r#"[{{"name": "{subcommand}", "type": 1, "options": [{to}]}}]"#);
+    slash("settings", &options, locale, permissions)
+}
+
+/// Where PuppyBot answers [`slash`].
+pub const COMMAND_ANSWER: &str =
+    "POST /api/v10/interactions/1200000000000000006/command-token/callback";
 
 /// The channel of the messages of the tests, see [`message`].
 pub const CHANNEL: u64 = 1_300_000_000_000_000_004;

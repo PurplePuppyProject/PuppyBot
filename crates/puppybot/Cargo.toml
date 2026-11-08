@@ -25,6 +25,7 @@ twilight-http.workspace = true
 twilight-model.workspace = true
 twilight-util.workspace = true
 redb.workspace = true
+ring.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true

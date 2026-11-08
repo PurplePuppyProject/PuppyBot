@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use puppybot_core::dice::{self, Dice};
 use puppybot_core::i18n::Lang;
 use puppybot_core::text::Text;
 use puppybot_core::text_command;
@@ -18,7 +19,9 @@ use twilight_model::guild::Permissions;
 use twilight_model::http::interaction::InteractionResponse;
 use twilight_model::id::Id;
 use twilight_model::id::marker::GuildMarker;
-use twilight_util::builder::command::{CommandBuilder, StringBuilder, SubCommandBuilder};
+use twilight_util::builder::command::{
+    BooleanBuilder, CommandBuilder, StringBuilder, SubCommandBuilder,
+};
 use twilight_util::builder::interaction_response::ChannelMessageBuilder;
 
 /// Discord's locale of the German texts. The English ones are the defaults.
@@ -63,7 +66,33 @@ pub fn commands() -> Vec<Command> {
         .option(language)
         .option(prefix)
         .build(),
+        dice(),
     ]
+}
+
+/// /dice, in German /würfel.
+fn dice() -> Command {
+    let expression = StringBuilder::new(
+        "expression",
+        Text::DiceExpressionDescription.render(Lang::En),
+    )
+    .name_localizations([(GERMAN, "ausdruck")])
+    .description_localizations([(GERMAN, Text::DiceExpressionDescription.render(Lang::De))])
+    .max_length(u16::from(dice::MAX_LENGTH));
+    let secret = BooleanBuilder::new("secret", Text::DiceSecretDescription.render(Lang::En))
+        .name_localizations([(GERMAN, "geheim")])
+        .description_localizations([(GERMAN, Text::DiceSecretDescription.render(Lang::De))]);
+    CommandBuilder::new(
+        "dice",
+        Text::DiceDescription.render(Lang::En),
+        CommandType::ChatInput,
+    )
+    .name_localizations([(GERMAN, "würfel")])
+    .description_localizations([(GERMAN, Text::DiceDescription.render(Lang::De))])
+    .contexts([InteractionContextType::Guild])
+    .option(expression)
+    .option(secret)
+    .build()
 }
 
 /// `option` with a choice for each language: its [`Lang::code`], named in English and German.
@@ -78,7 +107,7 @@ fn languages(option: StringBuilder) -> StringBuilder {
 }
 
 /// What an interaction asks PuppyBot for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request<'a> {
     /// An answer with this text.
     Answer(Text<'static>),
@@ -91,11 +120,27 @@ pub enum Request<'a> {
     /// A new prefix for the server, which [`text_command::is_valid_prefix`] accepts: /settings
     /// prefix with `to`.
     SetPrefix(Id<GuildMarker>, &'a str),
+    /// A roll of `dice`, which only the asker sees if it is `secret`: /dice.
+    Roll {
+        /// What to roll.
+        dice: Dice,
+        /// Whether only the asker sees the result.
+        secret: bool,
+    },
+}
+
+/// Who sees an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audience {
+    /// Only the person who asked.
+    Asker,
+    /// Everyone in the channel.
+    Everyone,
 }
 
 /// A slash command: what it asks for, and the language of the person who asked, in which the
 /// answer is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asked<'a> {
     /// What it asks for.
     pub request: Request<'a>,
@@ -122,6 +167,7 @@ pub fn request<'a>(
             }),
             "settings" if may_change_settings(interaction) => settings(command, guild),
             "settings" => Request::Answer(Text::NotAllowed),
+            "dice" => roll(command),
             _ => Request::Answer(Text::UnknownCommand),
         },
         _ => Request::Answer(Text::NotHere),
@@ -179,14 +225,35 @@ fn settings(command: &CommandData, guild: Id<GuildMarker>) -> Request<'_> {
     }
 }
 
-/// The answer with `content`: only the person who asked sees it, and it mentions nobody.
+/// /dice: the expression, one die with six sides without it, and whether the result is
+/// secret. Any other option is of another version of the command.
+fn roll(command: &CommandData) -> Request<'static> {
+    let mut expression = "";
+    let mut secret = false;
+    for option in &command.options {
+        match (option.name.as_str(), &option.value) {
+            ("expression", CommandOptionValue::String(text)) => expression = text,
+            ("secret", CommandOptionValue::Boolean(value)) => secret = *value,
+            _ => return Request::Answer(Text::UnknownCommand),
+        }
+    }
+    match Dice::parse_or_d6(expression) {
+        Ok(dice) => Request::Roll { dice, secret },
+        Err(error) => Request::Answer(Text::dice_error(error)),
+    }
+}
+
+/// The answer with `content` for `audience`, which mentions nobody.
 #[must_use]
-pub fn response(content: String) -> InteractionResponse {
-    ChannelMessageBuilder::new()
+pub fn response(content: String, audience: Audience) -> InteractionResponse {
+    let message = ChannelMessageBuilder::new()
         .content(content)
-        .flags(MessageFlags::EPHEMERAL)
-        .allowed_mentions(AllowedMentions::default())
-        .build()
+        .allowed_mentions(AllowedMentions::default());
+    match audience {
+        Audience::Asker => message.flags(MessageFlags::EPHEMERAL),
+        Audience::Everyone => message,
+    }
+    .build()
 }
 
 #[cfg(test)]
@@ -244,6 +311,17 @@ pub(crate) mod tests {
     /// /settings with the options `options`, as JSON, on the server [`GUILD`], by someone with
     /// the locale `locale` and the permissions `permissions`.
     pub(crate) fn settings(options: &str, locale: &str, permissions: u64) -> Interaction {
+        command("settings", options, locale, permissions)
+    }
+
+    /// The slash command `name` with the options `options`, as JSON, on the server [`GUILD`], by
+    /// someone with the locale `locale` and the permissions `permissions`.
+    pub(crate) fn command(
+        name: &str,
+        options: &str,
+        locale: &str,
+        permissions: u64,
+    ) -> Interaction {
         serde_json::from_str(&format!(
             r#"{{
                 "id": "1200000000000000001",
@@ -262,7 +340,7 @@ pub(crate) mod tests {
                     "user": {{"id": "1400000000000000005", "username": "puppy",
                         "discriminator": "0", "avatar": null}}
                 }},
-                "data": {{"id": "1200000000000000004", "name": "settings", "type": 1,
+                "data": {{"id": "1200000000000000004", "name": "{name}", "type": 1,
                     "options": {options}}}
             }}"#
         ))
@@ -286,7 +364,7 @@ pub(crate) mod tests {
         });
         for (locale, lang) in [("de", Lang::De), ("en-US", Lang::En), ("fr", Lang::En)] {
             let interaction = interaction(2, "info", locale, Some(GUILD));
-            assert_eq!(asked(&interaction), (info, lang), "{locale}");
+            assert_eq!(asked(&interaction), (info.clone(), lang), "{locale}");
         }
     }
 
@@ -402,8 +480,60 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn dice() {
+        let dice = |options: &str| command("dice", options, "de", 0);
+        assert_eq!(
+            asked(&dice("[]")).0,
+            Request::Roll {
+                dice: Dice::d6(),
+                secret: false
+            }
+        );
+        let options = r#"[{"name": "expression", "type": 3, "value": "2W6+3"},
+            {"name": "secret", "type": 5, "value": true}]"#;
+        assert_eq!(
+            asked(&dice(options)).0,
+            Request::Roll {
+                dice: Dice::parse("2d6+3").unwrap(),
+                secret: true
+            }
+        );
+        for (options, answer) in [
+            (
+                r#"[{"name": "expression", "type": 3, "value": "2d"}]"#,
+                Text::DiceInvalid,
+            ),
+            (
+                r#"[{"name": "expression", "type": 3, "value": "101d6"}]"#,
+                Text::DiceTooLarge,
+            ),
+            (
+                r#"[{"name": "colour", "type": 3, "value": "red"}]"#,
+                Text::UnknownCommand,
+            ),
+            (
+                r#"[{"name": "secret", "type": 3, "value": "yes"}]"#,
+                Text::UnknownCommand,
+            ),
+        ] {
+            assert_eq!(
+                asked(&dice(options)).0,
+                Request::Answer(answer),
+                "{options}"
+            );
+        }
+    }
+
+    #[test]
+    fn answers_for_everyone_in_the_channel() {
+        let data = response("4".to_owned(), Audience::Everyone).data.unwrap();
+        assert_eq!(data.flags, None);
+        assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
+    }
+
+    #[test]
     fn answers_only_for_the_person_who_asked() {
-        let response = response(Text::NotHere.render(Lang::En));
+        let response = response(Text::NotHere.render(Lang::En), Audience::Asker);
         assert_eq!(
             response.kind,
             InteractionResponseType::ChannelMessageWithSource
@@ -424,13 +554,51 @@ pub(crate) mod tests {
             .iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, ["info", "settings"]);
+        assert_eq!(names, ["info", "settings", "dice"]);
         for command in &commands {
             let german = &command.description_localizations.as_ref().unwrap()["de"];
             assert_ne!(&command.description, german);
             assert_eq!(command.contexts, Some(vec![InteractionContextType::Guild]));
         }
-        let (info, settings) = (&commands[0], &commands[1]);
+        let (info, settings, dice) = (&commands[0], &commands[1], &commands[2]);
+        // /dice, for everyone, in German /würfel.
+        assert_eq!(dice.default_member_permissions, None);
+        let german = |names: &Option<std::collections::HashMap<String, String>>| {
+            names.as_ref().and_then(|names| names.get("de").cloned())
+        };
+        assert_eq!(german(&dice.name_localizations).as_deref(), Some("würfel"));
+        let options: Vec<_> = dice
+            .options
+            .iter()
+            .map(|option| {
+                (
+                    option.name.as_str(),
+                    option.kind,
+                    german(&option.name_localizations),
+                    option.max_length,
+                    option.required,
+                )
+            })
+            .collect();
+        assert_eq!(
+            options,
+            [
+                (
+                    "expression",
+                    CommandOptionType::String,
+                    Some("ausdruck".to_owned()),
+                    Some(100),
+                    None
+                ),
+                (
+                    "secret",
+                    CommandOptionType::Boolean,
+                    Some("geheim".to_owned()),
+                    None,
+                    None
+                ),
+            ]
+        );
         assert_eq!(
             info.description,
             "Shows what PuppyBot is and which version runs"

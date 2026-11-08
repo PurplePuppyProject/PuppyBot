@@ -1,6 +1,6 @@
 # Fuzzing
 
-The fuzz targets feed random input to the code that reads what PuppyBot gets from outside: so far the command line of the program, the configuration file, the files with secrets, the interactions that Discord sends, e.g. slash commands, and the text commands in messages.
+The fuzz targets feed random input to the code that reads what PuppyBot gets from outside: so far the command line of the program, the configuration file, the files with secrets, the interactions that Discord sends, e.g. slash commands, the text commands in messages, and expressions of dice.
 Every parser of input from users, Discord or the configuration gets a target of its own.
 They run with [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) and libFuzzer.
 
@@ -8,6 +8,7 @@ They run with [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) and libFuzze
 |---|---|---|
 | `cli_args` | The command line, as arguments separated by NUL bytes | The command line of what the parser understood is understood the same, and the program prints the version or the help with the exit status 0, or an error with 2. It doesn't run the bot, which would read the files that the input names. |
 | `config` | The configuration file, as its text | An accepted configuration names a token file, at an absolute path, as the directory of the configuration file is, and at least one server. |
+| `dice` | An expression of dice, e.g. `2d6+3` | An expression that the parser accepts rolls at most 100 dice, reads the same when written again, and its roll, with every die at its most or its least, fits into a message of Discord. |
 | `interaction` | An interaction, as JSON from Discord's gateway | Each answer that it may get, with what the database may hold, is a message that only the person who asked sees, mentions nobody, and fits into Discord's limit of 2000 characters. |
 | `text_command` | A prefix, on the first line, and a message after it | A command comes only after the prefix or a mention of PuppyBot, its arguments are a part of the message without spaces around them, and an accepted prefix has 1 to 5 characters of ASCII that one can see. |
 | `token_file` | What a file with a secret holds | The secret is printable ASCII and the start of the input, and only line breaks follow it. |
