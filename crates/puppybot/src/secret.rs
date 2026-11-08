@@ -158,7 +158,7 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use super::*;
-    use crate::config::DiscordConfig;
+    use crate::config::{DiscordConfig, StorageConfig};
     use crate::logging::LogConfig;
 
     #[test]
@@ -212,6 +212,7 @@ mod tests {
                 gateway_url: None,
                 api_url: None,
             },
+            storage: StorageConfig::default(),
             log: LogConfig::default(),
         }
     }

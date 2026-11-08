@@ -11,9 +11,10 @@
 mod common;
 
 use std::ffi::OsStr;
+use std::fs;
 use std::os::unix::ffi::OsStrExt;
 
-use common::{FakeDiscord, Running, TOKEN, config, ready, run_to_end, setup};
+use common::{DATABASE, FakeDiscord, Running, TOKEN, config, ready, run_to_end, setup};
 
 /// Discord, which says READY once PuppyBot identified.
 fn discord() -> FakeDiscord {
@@ -139,6 +140,23 @@ fn no_ca_certificates() {
         log.contains(
             "PuppyBot can't run: found no CA certificates to check Discord's certificates with: "
         ),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_database_that_can_not_be_used() {
+    let dir = setup(&config(None, ""), Some((TOKEN, 0o600)));
+    // A directory where the file of the database should be.
+    let database = dir.path().join(DATABASE);
+    fs::create_dir(&database).unwrap();
+    let (status, log) = run_to_end(dir.path(), &[]);
+    assert_eq!(status, Some(1), "{log}");
+    assert!(
+        log.contains(&format!(
+            "PuppyBot can't run: can't use the database {}: can't open it: ",
+            database.display()
+        )),
         "{log}"
     );
 }

@@ -8,7 +8,7 @@ They run with [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) and libFuzze
 |---|---|---|
 | `cli_args` | The command line, as arguments separated by NUL bytes | The command line of what the parser understood is understood the same, and the program prints the version or the help with the exit status 0, or an error with 2. It doesn't run the bot, which would read the files that the input names. |
 | `config` | The configuration file, as its text | An accepted configuration names a token file, at an absolute path, as the directory of the configuration file is, and at least one server. |
-| `interaction` | An interaction, as JSON from Discord's gateway | An answer is a message that only the person who asked sees, mentions nobody, and fits into Discord's limit of 2000 characters. |
+| `interaction` | An interaction, as JSON from Discord's gateway | Each answer that it may get, with what the database may hold, is a message that only the person who asked sees, mentions nobody, and fits into Discord's limit of 2000 characters. |
 | `token_file` | What a file with a secret holds | The secret is printable ASCII and the start of the input, and only line breaks follow it. |
 
 ## Running

@@ -9,12 +9,17 @@
 
 mod common;
 
+use std::fs;
 use std::time::{Duration, Instant};
 
 use common::{
-    APPLICATION, FakeDiscord, GUILD, OTHER_GUILD, Running, Send, TOKEN, config, guild_create,
-    interaction, ready, setup,
+    APPLICATION, FakeDiscord, GUILD, MANAGE_GUILD, OTHER_GUILD, Running, Send, TOKEN, config,
+    guild_create, interaction, ready, settings_language, setup,
 };
+
+/// Where PuppyBot answers /settings, see [`settings_language`].
+const SETTINGS_ANSWER: &str =
+    "POST /api/v10/interactions/1200000000000000006/settings-token/callback";
 
 /// Starts PuppyBot with `discord`.
 fn start(discord: &FakeDiscord) -> (tempfile::TempDir, Running) {
@@ -58,6 +63,19 @@ fn registers_the_commands_leaves_other_servers_and_answers() {
     ));
     assert!(
         commands.body.contains(r#""name":"info""#),
+        "{}",
+        commands.body
+    );
+    // /settings, which Discord shows only to people who may manage the server.
+    assert!(
+        commands.body.contains(r#""name":"settings""#),
+        "{}",
+        commands.body
+    );
+    assert!(
+        commands
+            .body
+            .contains(r#""default_member_permissions":"32""#),
         "{}",
         commands.body
     );
@@ -175,4 +193,74 @@ fn stops_although_discord_does_not_close_the_connection() {
         "{:?}",
         start.elapsed()
     );
+}
+
+#[test]
+fn the_language_of_a_server_stays_after_a_restart() {
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                settings_language(Some("de"), "en-US", MANAGE_GUILD),
+            ]
+        },
+        None,
+    );
+    let (dir, mut bot) = start(&discord);
+    // In the language of the person who asked.
+    let answer = discord.wait_for_request(SETTINGS_ANSWER);
+    assert!(
+        answer
+            .body
+            .contains("From now on, PuppyBot writes to everyone on this server in German."),
+        "{}",
+        answer.body
+    );
+    bot.wait_for("changed the language of the server");
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert!(
+        log.contains(&format!(
+            "changed the language of the server server={GUILD} language=\"de\""
+        )),
+        "{log}"
+    );
+
+    // Again, with the same database.
+    let discord = FakeDiscord::start(
+        |url| vec![ready(url), settings_language(None, "de", MANAGE_GUILD)],
+        None,
+    );
+    fs::write(dir.path().join("config.toml"), config(Some(&discord), "")).unwrap();
+    let bot = Running::start(dir.path(), &[]);
+    let answer = discord.wait_for_request(SETTINGS_ANSWER);
+    assert!(
+        answer
+            .body
+            .contains("Auf diesem Server schreibt PuppyBot allen auf Deutsch."),
+        "{}",
+        answer.body
+    );
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+}
+
+#[test]
+fn settings_only_for_people_who_may_manage_the_server() {
+    let discord = FakeDiscord::start(
+        |url| vec![ready(url), settings_language(Some("en"), "de", 0)],
+        None,
+    );
+    let (_dir, bot) = start(&discord);
+    let answer = discord.wait_for_request(SETTINGS_ANSWER);
+    assert!(
+        answer.body.contains(
+            "Die Einstellungen von PuppyBot dürfen nur Leute nutzen, die diesen Server verwalten dürfen."
+        ),
+        "{}",
+        answer.body
+    );
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert!(!log.contains("changed the language"), "{log}");
 }

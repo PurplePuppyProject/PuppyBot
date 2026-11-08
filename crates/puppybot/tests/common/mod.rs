@@ -36,6 +36,12 @@ pub const OTHER_GUILD: u64 = 1_100_000_000_000_000_009;
 /// The application of the bot, as the gateway says.
 pub const APPLICATION: u64 = 1_200_000_000_000_000_002;
 
+/// The database of the tests, in the directory of the configuration.
+pub const DATABASE: &str = "puppybot.redb";
+
+/// The permission "Manage Server", as Discord sends permissions: a number.
+pub const MANAGE_GUILD: u64 = 1 << 5;
+
 /// How long a test waits for the program or Discord, before it gives up.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -48,7 +54,9 @@ pub fn config(discord: Option<&FakeDiscord>, extra: &str) -> String {
             discord.gateway_url, discord.api_url
         )
     });
-    format!("[discord]\ntoken-file = \"token\"\nguilds = [{GUILD}]\n{urls}{extra}")
+    format!(
+        "[discord]\ntoken-file = \"token\"\nguilds = [{GUILD}]\n{urls}[storage]\npath = \"{DATABASE}\"\n{extra}"
+    )
 }
 
 /// A directory with the configuration `config.toml` and, if given, the token file `token` with
@@ -196,6 +204,28 @@ pub fn guild_create(guild: u64) -> Send {
     Send::Dispatch(
         "GUILD_CREATE",
         format!(r#"{{"id": "{guild}", "unavailable": true}}"#),
+    )
+}
+
+/// /settings language on [`GUILD`], with `to` if given, by someone with the locale `locale` and
+/// the permissions `permissions`.
+pub fn settings_language(to: Option<&str>, locale: &str, permissions: u64) -> Send {
+    let to = to.map_or_else(String::new, |code| {
+        format!(r#"{{"name": "to", "type": 3, "value": "{code}"}}"#)
+    });
+    Send::Dispatch(
+        "INTERACTION_CREATE",
+        format!(
+            r#"{{"id": "1200000000000000006", "application_id": "{APPLICATION}", "type": 2,
+            "token": "settings-token", "version": 1, "locale": "{locale}",
+            "guild_id": "{GUILD}", "attachment_size_limit": 26214400,
+            "authorizing_integration_owners": {{}}, "entitlements": [],
+            "member": {{"deaf": false, "mute": false, "flags": 0, "roles": [], "joined_at": null,
+                "permissions": "{permissions}", "user": {{"id": "1400000000000000005",
+                "username": "puppy", "discriminator": "0", "avatar": null}}}},
+            "data": {{"id": "1200000000000000007", "name": "settings", "type": 1,
+                "options": [{{"name": "language", "type": 1, "options": [{to}]}}]}}}}"#
+        ),
     )
 }
 

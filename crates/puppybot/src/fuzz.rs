@@ -8,12 +8,15 @@ use std::io;
 use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 
+use puppybot_core::i18n::Lang;
+use puppybot_core::text::Text;
 use secrecy::ExposeSecret;
 use twilight_model::application::interaction::Interaction;
 use twilight_model::channel::message::{AllowedMentions, MessageFlags};
 use twilight_model::id::Id;
 
 use crate::cli;
+use crate::commands::Request;
 
 /// The command line, as arguments separated by NUL bytes, which arguments can't hold.
 ///
@@ -66,9 +69,9 @@ pub fn config(data: &[u8]) {
 
 /// An interaction, as JSON from Discord's gateway.
 ///
-/// Checks beyond not crashing: an answer of [`crate::commands::answer`], if there is one, is a
-/// message that only the person who asked sees, mentions nobody, and fits into Discord's limit
-/// of 2000 characters.
+/// Checks beyond not crashing: each answer that what [`crate::commands::request`] reads may
+/// get, with what the database may hold, is a message that only the person who asked sees,
+/// mentions nobody, and fits into Discord's limit of 2000 characters.
 ///
 /// # Panics
 ///
@@ -78,9 +81,25 @@ pub fn interaction(data: &[u8]) {
         return;
     };
     let guilds = BTreeSet::from([Id::new(1)]);
-    if let Some(response) = crate::commands::answer(&interaction, &guilds) {
+    let Some(asked) = crate::commands::request(&interaction, &guilds) else {
+        return;
+    };
+    let answers = match asked.request {
+        Request::Answer(text) => vec![text],
+        Request::ShowLanguage(_) => vec![
+            Text::LanguageIs { chosen: None },
+            Text::LanguageIs {
+                chosen: Some(Lang::De),
+            },
+            Text::StorageFailed,
+        ],
+        Request::SetLanguage(_, lang) => vec![Text::LanguageSet { lang }, Text::StorageFailed],
+    };
+    for text in answers {
         // An answer without a message has none of these.
-        let data = response.data.unwrap_or_default();
+        let data = crate::commands::response(&text, asked.lang)
+            .data
+            .unwrap_or_default();
         assert_eq!(data.flags, Some(MessageFlags::EPHEMERAL), "{data:?}");
         assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
         assert!(
@@ -187,7 +206,7 @@ mod tests {
             let seed = fs::read(&path).unwrap();
             let interaction: Interaction = serde_json::from_slice(&seed).unwrap();
             assert_eq!(
-                crate::commands::answer(&interaction, &guilds).is_some(),
+                crate::commands::request(&interaction, &guilds).is_some(),
                 interaction.kind == InteractionType::ApplicationCommand
             );
             super::interaction(&seed);

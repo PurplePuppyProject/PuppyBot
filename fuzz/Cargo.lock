@@ -466,6 +466,7 @@ name = "puppybot"
 version = "0.1.0"
 dependencies = [
  "puppybot-core",
+ "redb",
  "rustls",
  "rustls-native-certs",
  "secrecy",
@@ -507,6 +508,15 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "redb"
+version = "4.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b317ef681e18f6091efbfab532eaf924a135c492d9d0299d0fbfae07e92a39b"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "regex-automata"

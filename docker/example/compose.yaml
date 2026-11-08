@@ -18,8 +18,15 @@ services:
       - no-new-privileges:true
     volumes:
       - ./config.toml:/etc/puppybot/config.toml:ro
+      # The database, with the settings of each server, in a volume, which outlives the
+      # container.
+      - data:/var/lib/puppybot
     secrets:
       - discord_token
+
+volumes:
+  # Kept until it is removed, e.g. with docker compose down --volumes.
+  data:
 
 secrets:
   # In the container: /run/secrets/discord_token, see config.toml.

@@ -1,7 +1,7 @@
 //! PuppyBot, a Discord bot of the Purple Puppy Project: the program.
 //!
-//! It reads its configuration and the token of the bot, connects to Discord, answers the slash
-//! commands on its servers, and runs until a signal stops it. `src/main.rs` only hands over to
+//! It reads its configuration and the token of the bot, opens its database, connects to Discord,
+//! answers the slash commands on its servers, and runs until a signal stops it. `src/main.rs` only hands over to
 //! [`run`], so the tests reach everything the program does.
 
 #[cfg(not(unix))]
@@ -23,6 +23,7 @@ pub mod fuzz;
 pub mod logging;
 pub mod secret;
 pub mod shutdown;
+pub mod storage;
 
 /// The version of PuppyBot, from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -95,17 +96,21 @@ fn usage_error(err: &mut dyn Write, error: &dyn Display) -> u8 {
     EXIT_USAGE
 }
 
-/// Reads the secrets, and runs on Discord until a signal stops PuppyBot.
+/// Reads the secrets, opens the database, and runs on Discord until a signal stops PuppyBot.
 fn serve(config: &config::Config, path: &Path) -> Result<shutdown::Stop, Box<dyn Error>> {
     let secrets = secret::Secrets::load(config)?;
     discord::prepare_tls()?;
+    let database = &config.storage.path;
+    let storage = storage::Storage::open(database)
+        .map_err(|error| format!("can't use the database {}: {error}", database.display()))?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async move {
         // Caught before saying that PuppyBot started, which tells that it may be stopped.
         let mut signals = shutdown::Signals::new()?;
-        let discord = discord::Discord::new(&config.discord, secrets.discord_token());
+        let discord =
+            discord::Discord::new(&config.discord, secrets.discord_token(), Box::new(storage));
         drop(secrets);
         tracing::info!(
             version = VERSION,
