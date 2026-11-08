@@ -208,6 +208,9 @@ mod tests {
         Config {
             discord: DiscordConfig {
                 token_file: path.to_owned(),
+                guilds: Vec::new(),
+                gateway_url: None,
+                api_url: None,
             },
             log: LogConfig::default(),
         }

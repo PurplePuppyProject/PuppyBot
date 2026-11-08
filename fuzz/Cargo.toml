@@ -31,6 +31,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "interaction"
+path = "fuzz_targets/interaction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "token_file"
 path = "fuzz_targets/token_file.rs"
 test = false

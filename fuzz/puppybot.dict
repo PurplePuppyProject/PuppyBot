@@ -26,3 +26,24 @@
 
 # Files with secrets: line breaks at the end.
 "\x0d\x0a"
+
+# Interactions, as JSON from Discord's gateway. The seeds in seeds/interaction hold whole ones.
+"\"id\""
+"\"application_id\""
+"\"type\""
+"\"version\""
+"\"locale\""
+"\"guild_id\""
+"\"data\""
+"\"name\""
+"\"options\""
+"\"info\""
+"\"de\""
+"\"en-US\""
+"\"1\""
+"null"
+"true"
+"\":\""
+"\",\""
+"{}"
+"[]"

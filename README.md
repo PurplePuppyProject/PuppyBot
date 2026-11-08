@@ -6,13 +6,33 @@
 
 A Discord bot of the Purple Puppy Project, written in Rust; a Signal bot may follow.
 
-**Status: being built.** So far the program reads its [configuration](#configuration) and the token of the bot, logs, and runs until a signal [stops](#running-and-stopping) it; it doesn't connect to Discord yet. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
+**Status: being built.** So far PuppyBot connects to Discord, works only on the servers that its [configuration](#configuration) names, and answers [`/info`](#commands), in German or English. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
 
 The project holds itself to:
 
 - **100 % test coverage:** CI fails if the tests leave a single line or function uncovered.
 - **Fuzzing:** every parser of input from outside has a fuzz target, run on each pull request and longer once a week.
 - **Conservative security:** no `unsafe`, strict Clippy lints, checked dependencies, pinned GitHub Actions, a Docker image without shell or root, and attestations of where binaries and image were built.
+
+## Setting Up the Bot on Discord
+
+PuppyBot works only on servers that you choose, so it is a private bot: only you can add it to servers. In the [Developer Portal](https://discord.com/developers/applications):
+
+1. Create an application with **New Application**.
+2. On **Installation**, check only **Guild Install** under **Installation Contexts**, and set the **Install Link** to **None**: a private bot can't have one.
+3. On **Bot**, turn **Public Bot** off, and get the token with **Reset Token**. It goes into the token file, see [Docker Compose](#docker-compose). PuppyBot needs none of the privileged intents on that page.
+4. On **OAuth2**, let the **URL Generator** make a link with the scopes `bot` and `applications.commands`, as a guild install and without permissions. Open it to add the bot to a server; you need the permission "Manage Server" there.
+5. In Discord, turn on the developer mode (User Settings, Advanced), choose **Copy Server ID** in the menu of the server, and put the ID into `guilds` in the [configuration](#configuration).
+
+PuppyBot registers its commands only on the servers in `guilds`, and leaves any other server it is on, with a warning in its log.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/info` | Shows what PuppyBot is, which version runs, and where its code is |
+
+PuppyBot's answers are shown only to the person who asked, and mention nobody. They are in German for people whose Discord is in German, and in English for everyone else.
 
 ## Docker
 
@@ -39,9 +59,10 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
    (umask 077 && read -rsp 'Discord token: ' token && printf '%s\n' "$token" > discord_token)
    sudo chown 65532:65532 discord_token
    ```
-2. Start the bot with `docker compose up -d`. `docker compose logs` shows its log, `docker compose stop` stops it.
+2. Put the IDs of your servers into `guilds` in `config.toml`, see [Setting Up the Bot on Discord](#setting-up-the-bot-on-discord).
+3. Start the bot with `docker compose up -d`. `docker compose logs` shows its log, `docker compose stop` stops it.
 
-The container runs read-only, without capabilities and without gaining privileges. Compose gives it the token as the secret `/run/secrets/discord_token`, a file, which unlike an environment variable doesn't show in `docker inspect`. CI runs the example with each change, see `docker/test-example.sh`.
+The container runs read-only, without capabilities and without gaining privileges. Compose gives it the token as the secret `/run/secrets/discord_token`, a file, which unlike an environment variable doesn't show in `docker inspect`. CI runs the example with each change, with a token that Discord rejects: so it checks that the image gets as far as Discord, see `docker/test-example.sh`.
 
 ### Checking the Image
 
@@ -65,6 +86,8 @@ PuppyBot reads its settings from a [TOML](https://toml.io) file: `/etc/puppybot/
 | Key | Default | What it sets |
 |---|---|---|
 | `[discord]` `token-file` | none, it must be given | The file with the token of the bot, e.g. a Docker secret |
+| `[discord]` `guilds` | none, it must be given | The IDs of the servers that PuppyBot works on, e.g. `[123456789012345678, 234567890123456789]`: it registers its commands only there, and leaves any other server |
+| `[discord]` `gateway-url`, `api-url` | Discord's | For tests only: a gateway (`ws://`) and an API (`http://`) on this machine, e.g. `ws://127.0.0.1:8080`. Other addresses are errors, so that a changed configuration can't send the token elsewhere. |
 | `[log]` `level` | `info` | The most detailed level that is logged: `error`, `warn`, `info`, `debug` or `trace` |
 | `[log]` `format` | `text` | `text`, a line per message, or `json`, a JSON object per line, for log collectors |
 
@@ -75,10 +98,10 @@ PuppyBot reads its settings from a [TOML](https://toml.io) file: `/etc/puppybot/
 
 ## Running and Stopping
 
-PuppyBot runs until `SIGTERM`, which `docker stop` and service managers send, or `SIGINT`, from Ctrl+C, stops it. It logs to stderr, which Docker collects. Its exit status is:
+PuppyBot runs until `SIGTERM`, which `docker stop` and service managers send, or `SIGINT`, from Ctrl+C, stops it. Then it closes the connection to Discord, and waits for Discord to close it too, for at most 5 seconds, within the 10 seconds that `docker stop` waits. If the connection breaks before, PuppyBot connects again by itself. It logs to stderr, which Docker collects. Its exit status is:
 
 - 0 when a signal stopped it, or after `--version` or `--help`;
-- 1 if it can't run, e.g. as the token file is missing or holds no valid token;
+- 1 if it can't run, e.g. as the token file is missing or holds no valid token, as the system has no CA certificates, or as Discord closed the connection for good, e.g. with the code 4004, as it rejected the token;
 - 2 for a command line, a configuration file or a `RUST_LOG` that PuppyBot can't use.
 
 ## Project Layout
@@ -86,7 +109,7 @@ PuppyBot runs until `SIGTERM`, which `docker stop` and service managers send, or
 | Path | What it holds |
 |---|---|
 | `crates/puppybot-core` | The bot's logic, its parsers and its texts in German and English, without Discord, storage or I/O |
-| `crates/puppybot` | The program: its command line, configuration, secrets, logging and signals; later Discord, storage and feeds |
+| `crates/puppybot` | The program: its command line, configuration, secrets, logging and signals, and the connection to Discord with its commands; later storage and feeds |
 | `fuzz/` | The fuzz targets, a workspace of its own, see [fuzz/README.md](fuzz/README.md) |
 | `docker/` | The Dockerfile, the script that prepares its build context, the check of its SBOMs, and the example of Docker Compose with its test |
 | `utils/` | `set-version.sh`, which prepares a release |
@@ -96,7 +119,7 @@ PuppyBot runs until `SIGTERM`, which `docker stop` and service managers send, or
 
 ### Getting Started
 
-Install Rust with [rustup](https://rustup.rs). The bot builds with the current stable Rust, and with Rust 1.85 or newer (`rust-version` in `Cargo.toml`, checked by CI).
+Install Rust with [rustup](https://rustup.rs). The bot builds with the current stable Rust, and with Rust 1.89 or newer (`rust-version` in `Cargo.toml`, checked by CI).
 The checks need some tools:
 
 ```sh
@@ -119,8 +142,10 @@ It checks the formatting (`cargo fmt`), runs Clippy and builds the docs with all
 `make coverage` runs the tests with [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) and fails if they cover less than 100 % of the lines or of the functions (`COVERAGE_MIN` in the `Makefile`).
 It prints a summary per file, writes an HTML report with the covered lines to `target/llvm-cov/html` and an LCOV report to `target/llvm-cov/lcov.info`.
 
-- The program in `crates/puppybot/src/main.rs` only hands over to its library, and `crates/puppybot/tests/cli.rs` starts it, so its coverage counts too.
+- The program in `crates/puppybot/src/main.rs` only hands over to its library, and the tests in `crates/puppybot/tests/` start it, so its coverage counts too.
+- No test reaches the real Discord: the tests in `crates/puppybot/tests/` run the program against a gateway and an API on the test machine (`tests/common`), which check what it sends, e.g. its token, its commands and its answers. Only the test of the Docker image talks to Discord, see [Docker Compose](#docker-compose).
 - The coverage of a generic function is that of its best instantiation, not of all of them together. Functions that the tests need to call with other types, e.g. writers that fail, take trait objects (`&mut dyn Write`) instead.
+- The same holds for the library's functions, which are compiled twice: into its unit tests, and into the program that the integration tests start. A function counts only with the better of the two, so one of them must cover all of it. If the summary counts a missed line that `--show-missing-lines` doesn't list, the two cover it only together, e.g. a branch that only a unit test reaches.
 
 ### Fuzzing and Dependency Checks
 

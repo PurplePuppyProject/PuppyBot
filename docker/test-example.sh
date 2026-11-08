@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Runs the example in docker/example with a token for the test, and checks that PuppyBot starts,
-# never logs the token, and stops on SIGTERM with the exit status 0. Uses the image by the name in
-# compose.yaml, so tag the image to test like that, as the release workflow does. Needs Docker
-# Compose, and sudo to give the token file to the user of the image, as the README describes.
+# connects to Discord, which rejects the token, and exits with the status 1 and an error that says
+# so, without warnings and without logging the token. So it checks the image as it runs: the
+# configuration, the secret, and TLS with the CA certificates of the image. Needs the network, to
+# reach Discord. Uses the image by the name in compose.yaml, so tag the image to test like that,
+# as the release workflow does. Needs Docker Compose, and sudo to give the token file to the user
+# of the image, as the README describes.
 #
 # Usage: docker/test-example.sh
 set -euo pipefail
@@ -18,52 +21,45 @@ token=test-$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 
 cleanup() {
     status=$?
-    if [ "$status" -ne 0 ]; then
-        "${compose[@]}" logs || true
-    fi
     "${compose[@]}" down --volumes || true
     sudo rm -f "$token_file"
     exit "$status"
 }
 trap cleanup EXIT
 
-# Waits until the log contains the text.
-wait_for_log() {
-    for _ in $(seq 60); do
-        if "${compose[@]}" logs 2>&1 | grep -qF "$1"; then
-            return 0
-        fi
-        sleep 1
-    done
-    echo "No \"$1\" in the log" >&2
-    return 1
-}
-
 # As the README describes it: readable only by the user of the image.
 (umask 077 && printf '%s\n' "$token" > "$token_file")
 sudo chown 65532:65532 "$token_file"
 
-"${compose[@]}" up --detach
-wait_for_log "PuppyBot started"
-# Sends SIGTERM and waits until the program exits.
-"${compose[@]}" stop
-container=$("${compose[@]}" ps --all --quiet puppybot)
-exit_status=$(docker inspect --format '{{.State.ExitCode}}' "$container")
-log=$("${compose[@]}" logs 2>&1)
-
-if [ "$exit_status" != 0 ]; then
-    echo "PuppyBot exited with $exit_status, not 0" >&2
-    exit 1
+# Once, without restarting it as compose.yaml says. Discord rejects the token within seconds.
+if log=$(timeout 120 "${compose[@]}" run --rm --no-TTY puppybot 2>&1); then
+    exit_status=0
+else
+    exit_status=$?
 fi
-if ! grep -qF 'PuppyBot stopped signal="SIGTERM"' <<< "$log"; then
-    echo "PuppyBot didn't log that SIGTERM stopped it" >&2
+
+if [ "$exit_status" = 124 ]; then
+    echo "PuppyBot didn't stop within 2 minutes: can it reach Discord?" >&2
+    printf '%s\n' "$log" >&2
     exit 1
 fi
 if grep -qF "$token" <<< "$log"; then
     echo "The log shows the token" >&2
     exit 1
 fi
-if grep -q WARN <<< "$log"; then
+printf '%s\n' "$log"
+if [ "$exit_status" != 1 ]; then
+    echo "PuppyBot exited with $exit_status, not 1" >&2
+    exit 1
+fi
+for expected in "PuppyBot started" "PuppyBot can't run: Discord closed the connection for good with the code 4004"; do
+    if ! grep -qF "$expected" <<< "$log"; then
+        echo "No \"$expected\" in the log" >&2
+        exit 1
+    fi
+done
+# PuppyBot's lines, not those of Compose, which go to the same output.
+if grep -qE '^[^ ]+Z +WARN ' <<< "$log"; then
     echo "PuppyBot warned" >&2
     exit 1
 fi
