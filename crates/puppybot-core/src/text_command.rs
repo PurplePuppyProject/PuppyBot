@@ -36,11 +36,22 @@ pub enum TextCommand {
     Dice,
     /// A poll, see [`crate::poll`].
     Poll,
+    /// When the server was created, and how many members it has.
+    Server,
+    /// Since when someone is on Discord and on the server.
+    User,
 }
 
 impl TextCommand {
     /// All text commands.
-    pub const ALL: [Self; 4] = [Self::Info, Self::Help, Self::Dice, Self::Poll];
+    pub const ALL: [Self; 6] = [
+        Self::Info,
+        Self::Help,
+        Self::Dice,
+        Self::Poll,
+        Self::Server,
+        Self::User,
+    ];
 
     /// The names of the command: in English, and in German if it differs.
     #[must_use]
@@ -50,6 +61,8 @@ impl TextCommand {
             Self::Help => &["help", "hilfe"],
             Self::Dice => &["dice", "roll", "würfel"],
             Self::Poll => &["poll", "umfrage"],
+            Self::Server => &["server"],
+            Self::User => &["user", "nutzer"],
         }
     }
 

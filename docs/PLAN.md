@@ -68,7 +68,13 @@ Decided in `feature/polls`, with the user: Discord's own polls.
 - **PuppyBot posts the poll as a message of its own,** and tells the person who asked that it did: twilight's type of polls has no field for how long a new poll runs, so PuppyBot writes the body of the message itself (`payload_json`).
 - **The limits:** a question of up to 300 characters, 2 to 10 answers of up to 55 characters, and 1 to 168 hours, by default 24. The sources at hand disagreed whether Discord allows 7 or 32 days, so 7 it is, which both allow.
 - **As a text command,** the question and the answers are separated by `|`; the poll runs 24 hours, with one answer each.
-- **The texts** are still one enum, whose two functions, one per language, are now longer than Clippy likes (`too_many_lines`, allowed there with its reason). The plan's enum per area, e.g. for settings, dice and polls, is a refactoring of its own, before the next features.
+- **The texts** are still one enum, whose two functions, one per language, are now longer than Clippy likes (`too_many_lines`, allowed there with its reason). New areas with many texts, e.g. the answers of the games, get an enum of their own; splitting the one there is would touch every place that uses a text, for little.
+
+Decided in `feature/info_commands`:
+
+- **`/server`** asks Discord's API for the server with its counts, `approximate_member_count`, when someone asks: a count from the gateway would be old soon, as PuppyBot doesn't get the members' events without the privileged intent Server Members.
+- **`/user`** takes the person and the date they joined from what Discord sends with the command or the message; no request is needed. When something came to Discord follows from its ID, which begins with the milliseconds since 2015.
+- **Dates are Discord's timestamps,** `<t:…:D>` and `<t:…:R>`, which Discord shows in the language and time zone of each reader.
 
 ## Structure
 

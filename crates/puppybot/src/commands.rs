@@ -20,8 +20,9 @@ use twilight_model::guild::Permissions;
 use twilight_model::http::interaction::InteractionResponse;
 use twilight_model::id::Id;
 use twilight_model::id::marker::GuildMarker;
+use twilight_model::util::Timestamp;
 use twilight_util::builder::command::{
-    BooleanBuilder, CommandBuilder, IntegerBuilder, StringBuilder, SubCommandBuilder,
+    BooleanBuilder, CommandBuilder, IntegerBuilder, StringBuilder, SubCommandBuilder, UserBuilder,
 };
 use twilight_util::builder::interaction_response::ChannelMessageBuilder;
 
@@ -69,7 +70,37 @@ pub fn commands() -> Vec<Command> {
         .build(),
         dice(),
         poll(),
+        CommandBuilder::new(
+            "server",
+            Text::ServerDescription.render(Lang::En),
+            CommandType::ChatInput,
+        )
+        .description_localizations([(GERMAN, Text::ServerDescription.render(Lang::De))])
+        .contexts([InteractionContextType::Guild])
+        .build(),
+        CommandBuilder::new(
+            "user",
+            Text::UserDescription.render(Lang::En),
+            CommandType::ChatInput,
+        )
+        .name_localizations([(GERMAN, "nutzer")])
+        .description_localizations([(GERMAN, Text::UserDescription.render(Lang::De))])
+        .contexts([InteractionContextType::Guild])
+        .option(
+            UserBuilder::new("who", Text::UserWhoDescription.render(Lang::En))
+                .name_localizations([(GERMAN, "wer")])
+                .description_localizations([(GERMAN, Text::UserWhoDescription.render(Lang::De))]),
+        )
+        .build(),
     ]
+}
+
+/// When the thing with the ID `id` came to Discord, in seconds since 1970: Discord's IDs begin
+/// with the milliseconds since 2015.
+#[must_use]
+pub fn created(id: u64) -> i64 {
+    // At most 2^42 milliseconds, which an i64 holds.
+    (i64::try_from(id >> 22).unwrap_or(0) + 1_420_070_400_000) / 1000
 }
 
 /// /poll, in German /umfrage: the question, 2 to 10 answers, the hours, and whether people may
@@ -161,7 +192,7 @@ fn languages(option: StringBuilder) -> StringBuilder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request<'a> {
     /// An answer with this text.
-    Answer(Text<'static>),
+    Answer(Text<'a>),
     /// The language of the server: /settings language without `to`.
     ShowLanguage(Id<GuildMarker>),
     /// A new language for the server: /settings language with `to`.
@@ -173,6 +204,8 @@ pub enum Request<'a> {
     SetPrefix(Id<GuildMarker>, &'a str),
     /// A poll to post in the channel: /poll.
     Poll(Poll),
+    /// When the server was created, and how many members it has: /server.
+    ServerInfo(Id<GuildMarker>),
     /// A roll of `dice`, which only the asker sees if it is `secret`: /dice.
     Roll {
         /// What to roll.
@@ -222,6 +255,8 @@ pub fn request<'a>(
             "settings" => Request::Answer(Text::NotAllowed),
             "dice" => roll(command),
             "poll" => poll_request(command),
+            "server" => Request::ServerInfo(guild),
+            "user" => user_info(interaction, command),
             _ => Request::Answer(Text::UnknownCommand),
         },
         _ => Request::Answer(Text::NotHere),
@@ -295,6 +330,37 @@ fn roll(command: &CommandData) -> Request<'static> {
         Ok(dice) => Request::Roll { dice, secret },
         Err(error) => Request::Answer(Text::dice_error(error)),
     }
+}
+
+/// /user: since when the person in the option `who`, or who asked, is on Discord and on the
+/// server. Discord sends the person with the command.
+fn user_info<'a>(interaction: &'a Interaction, command: &'a CommandData) -> Request<'a> {
+    let who =
+        command
+            .options
+            .iter()
+            .find_map(|option| match (option.name.as_str(), &option.value) {
+                ("who", CommandOptionValue::User(user)) => Some(*user),
+                _ => None,
+            });
+    let (user, joined) = if let Some(who) = who {
+        let resolved = command.resolved.as_ref();
+        let user = resolved.and_then(|resolved| resolved.users.get(&who));
+        let member = resolved.and_then(|resolved| resolved.members.get(&who));
+        (user, member.and_then(|member| member.joined_at))
+    } else {
+        let member = interaction.member.as_ref();
+        let user = member.and_then(|member| member.user.as_ref());
+        (user, member.and_then(|member| member.joined_at))
+    };
+    let Some(user) = user else {
+        return Request::Answer(Text::UnknownCommand);
+    };
+    Request::Answer(Text::UserInfo {
+        name: user.global_name.as_deref().unwrap_or(&user.name),
+        created: created(user.id.get()),
+        joined: joined.map(Timestamp::as_secs),
+    })
 }
 
 /// /poll: the question, the answers in the order of their numbers, the hours, and whether
@@ -411,6 +477,18 @@ pub(crate) mod tests {
         locale: &str,
         permissions: u64,
     ) -> Interaction {
+        resolved(name, options, "null", locale, permissions)
+    }
+
+    /// [`command`], with `resolved`, as JSON: what Discord sends of the people, channels or
+    /// messages in the options.
+    pub(crate) fn resolved(
+        name: &str,
+        options: &str,
+        resolved: &str,
+        locale: &str,
+        permissions: u64,
+    ) -> Interaction {
         serde_json::from_str(&format!(
             r#"{{
                 "id": "1200000000000000001",
@@ -430,7 +508,7 @@ pub(crate) mod tests {
                         "discriminator": "0", "avatar": null}}
                 }},
                 "data": {{"id": "1200000000000000004", "name": "{name}", "type": 1,
-                    "options": {options}}}
+                    "options": {options}, "resolved": {resolved}}}
             }}"#
         ))
         .unwrap()
@@ -662,6 +740,65 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_server_and_people() {
+        assert_eq!(
+            asked(&command("server", "[]", "de", 0)).0,
+            Request::ServerInfo(Id::new(GUILD))
+        );
+        // Who asked, without the option.
+        assert_eq!(
+            asked(&command("user", "[]", "de", 0)).0,
+            Request::Answer(Text::UserInfo {
+                name: "puppy",
+                created: 1_753_856_410,
+                joined: None
+            })
+        );
+        // Someone else, whom Discord sends with the command.
+        let who = r#"[{"name": "who", "type": 6, "value": "1100000000000000001"}]"#;
+        let people = r#"{"users": {"1100000000000000001": {"id": "1100000000000000001",
+            "username": "rex", "global_name": "Rex", "discriminator": "0", "avatar": null}},
+            "members": {"1100000000000000001": {"roles": [], "flags": 0, "pending": false,
+            "permissions": "0", "joined_at": "2026-01-01T00:00:00.000000+00:00"}}}"#;
+        assert_eq!(
+            asked(&resolved("user", who, people, "de", 0)).0,
+            Request::Answer(Text::UserInfo {
+                name: "Rex",
+                created: 1_682_330_837,
+                joined: Some(1_767_225_600)
+            })
+        );
+        // Unless Discord didn't.
+        assert_eq!(
+            asked(&command("user", who, "de", 0)).0,
+            Request::Answer(Text::UnknownCommand)
+        );
+        // An option of another version doesn't name anyone: who asked.
+        let other = r#"[{"name": "colour", "type": 3, "value": "red"}]"#;
+        assert_eq!(
+            asked(&command("user", other, "de", 0)).0,
+            Request::Answer(Text::UserInfo {
+                name: "puppy",
+                created: 1_753_856_410,
+                joined: None
+            })
+        );
+        let mut without_member = command("user", "[]", "de", 0);
+        without_member.member = None;
+        assert_eq!(
+            asked(&without_member).0,
+            Request::Answer(Text::UnknownCommand)
+        );
+    }
+
+    #[test]
+    fn when_things_came_to_discord() {
+        // Discord's epoch, 2015, and the last millisecond that its IDs can hold.
+        assert_eq!(created(0), 1_420_070_400);
+        assert_eq!(created(u64::MAX), 5_818_116_911);
+    }
+
+    #[test]
     fn answers_for_everyone_in_the_channel() {
         let data = response("4".to_owned(), Audience::Everyone).data.unwrap();
         assert_eq!(data.flags, None);
@@ -761,7 +898,10 @@ pub(crate) mod tests {
             .iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, ["info", "settings", "dice", "poll"]);
+        assert_eq!(
+            names,
+            ["info", "settings", "dice", "poll", "server", "user"]
+        );
         for command in &commands {
             let german = &command.description_localizations.as_ref().unwrap()["de"];
             assert_ne!(&command.description, german);

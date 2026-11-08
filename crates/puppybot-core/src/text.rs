@@ -104,6 +104,32 @@ pub enum Text<'a> {
     PollInvalid,
     /// The answer to a poll beyond the limits of [`crate::poll`].
     PollTooLarge,
+    /// The description of /server.
+    ServerDescription,
+    /// The description of /user.
+    UserDescription,
+    /// The description of the option `who` of /user.
+    UserWhoDescription,
+    /// The answer to /server.
+    ServerInfo {
+        /// The name of the server.
+        name: &'a str,
+        /// When it was created, in seconds since 1970.
+        created: i64,
+        /// About how many members it has, if Discord says.
+        members: Option<u64>,
+    },
+    /// The answer to /user.
+    UserInfo {
+        /// The name of the person.
+        name: &'a str,
+        /// When they came to Discord, in seconds since 1970.
+        created: i64,
+        /// When they joined the server, in seconds since 1970, if Discord says.
+        joined: Option<i64>,
+    },
+    /// The answer to /server when PuppyBot can't get at the details.
+    InfoFailed,
 }
 
 impl Text<'_> {
@@ -137,7 +163,7 @@ impl Text<'_> {
 
     /// All texts, with an example for each value they hold, e.g. for tests that each exists in
     /// every language.
-    pub const ALL: [Text<'static>; 38] = [
+    pub const ALL: [Text<'static>; 46] = [
         Text::InfoDescription,
         Text::Info { version: "1.2.3" },
         Text::UnknownCommand,
@@ -183,10 +209,34 @@ impl Text<'_> {
         Text::PollFailed,
         Text::PollInvalid,
         Text::PollTooLarge,
+        Text::ServerDescription,
+        Text::UserDescription,
+        Text::UserWhoDescription,
+        Text::ServerInfo {
+            name: "Purple Puppies",
+            created: 1_700_000_000,
+            members: Some(42),
+        },
+        Text::ServerInfo {
+            name: "Purple Puppies",
+            created: 1_700_000_000,
+            members: None,
+        },
+        Text::UserInfo {
+            name: "Puppy",
+            created: 1_600_000_000,
+            joined: Some(1_700_000_000),
+        },
+        Text::UserInfo {
+            name: "Puppy",
+            created: 1_600_000_000,
+            joined: None,
+        },
+        Text::InfoFailed,
     ];
 
     /// The descriptions in the list of commands, which Discord limits to 100 characters.
-    pub const DESCRIPTIONS: [Text<'static>; 14] = [
+    pub const DESCRIPTIONS: [Text<'static>; 17] = [
         Text::InfoDescription,
         Text::SettingsDescription,
         Text::LanguageDescription,
@@ -201,6 +251,9 @@ impl Text<'_> {
         Text::PollAnswerDescription,
         Text::PollHoursDescription,
         Text::PollMultipleDescription,
+        Text::ServerDescription,
+        Text::UserDescription,
+        Text::UserWhoDescription,
     ];
 
     /// The text in `lang`.
@@ -289,6 +342,7 @@ impl Text<'_> {
                  - `{prefix}info`: was PuppyBot ist und welche Version läuft\n\
                  - `{prefix}würfel 2W6+3`: würfelt, z. B. auch `W20` oder `4W6kh3`\n\
                  - `{prefix}umfrage Pizza? | Ja | Nein`: startet eine Umfrage für 24 Stunden\n\
+                 - `{prefix}server`, `{prefix}nutzer`: seit wann es diesen Server gibt, und seit wann jemand hier ist\n\
                  - `{prefix}hilfe`: diese Befehle\n\
                  Seine Slash-Befehle, z. B. `/info`, stehen in Discords Liste der Befehle."
             ),
@@ -329,6 +383,37 @@ impl Text<'_> {
             }
             Self::PollTooLarge => {
                 "Eine Umfrage hat eine Frage mit bis zu 300 Zeichen und höchstens 10 Antworten mit bis zu 55 Zeichen, und sie läuft 1 bis 168 Stunden."
+                    .to_owned()
+            }
+            Self::ServerDescription => {
+                "Zeigt, wann dieser Server entstand und wie viele Mitglieder er hat".to_owned()
+            }
+            Self::UserDescription => {
+                "Zeigt, seit wann jemand auf Discord und auf diesem Server ist".to_owned()
+            }
+            Self::UserWhoDescription => "Wen es zeigt; ohne es dich".to_owned(),
+            Self::ServerInfo {
+                name,
+                created,
+                members,
+            } => {
+                let members = members.map_or_else(String::new, |members| {
+                    format!(" und hat etwa {members} Mitglieder")
+                });
+                format!("**{name}** entstand am <t:{created}:D> (<t:{created}:R>){members}.")
+            }
+            Self::UserInfo {
+                name,
+                created,
+                joined,
+            } => {
+                let joined = joined.map_or_else(String::new, |joined| {
+                    format!(" und seit <t:{joined}:D> auf diesem Server")
+                });
+                format!("**{name}** ist seit <t:{created}:D> (<t:{created}:R>) auf Discord{joined}.")
+            }
+            Self::InfoFailed => {
+                "PuppyBot kommt gerade nicht an die Angaben. Bitte später noch einmal versuchen."
                     .to_owned()
             }
         }
@@ -406,6 +491,7 @@ impl Text<'_> {
                  - `{prefix}info`: what PuppyBot is, and which version runs\n\
                  - `{prefix}dice 2d6+3`: rolls dice, e.g. also `d20` or `4d6kh3`\n\
                  - `{prefix}poll Pizza? | Yes | No`: starts a poll for 24 hours\n\
+                 - `{prefix}server`, `{prefix}user`: since when this server is there, and someone is here\n\
                  - `{prefix}help`: these commands\n\
                  Its slash commands, e.g. `/info`, are in Discord's list of commands."
             ),
@@ -448,6 +534,36 @@ impl Text<'_> {
                 "A poll has a question of up to 300 characters and at most 10 answers of up to 55 characters, and it runs 1 to 168 hours."
                     .to_owned()
             }
+            Self::ServerDescription => {
+                "Shows when this server was created, and how many members it has".to_owned()
+            }
+            Self::UserDescription => {
+                "Shows since when someone is on Discord and on this server".to_owned()
+            }
+            Self::UserWhoDescription => "Whom to show; without it, you".to_owned(),
+            Self::ServerInfo {
+                name,
+                created,
+                members,
+            } => {
+                let members = members.map_or_else(String::new, |members| {
+                    format!(", and has about {members} members")
+                });
+                format!("**{name}** was created on <t:{created}:D> (<t:{created}:R>){members}.")
+            }
+            Self::UserInfo {
+                name,
+                created,
+                joined,
+            } => {
+                let joined = joined.map_or_else(String::new, |joined| {
+                    format!(", and on this server since <t:{joined}:D>")
+                });
+                format!("**{name}** is on Discord since <t:{created}:D> (<t:{created}:R>){joined}.")
+            }
+            Self::InfoFailed => {
+                "PuppyBot can't get at the details right now. Please try again later.".to_owned()
+            }
         }
     }
 }
@@ -482,6 +598,28 @@ mod tests {
     }
 
     #[test]
+    fn dates_as_discord_timestamps() {
+        let server = Text::ServerInfo {
+            name: "Purple Puppies",
+            created: 1_700_000_000,
+            members: Some(42),
+        };
+        assert_eq!(
+            server.render(Lang::En),
+            "**Purple Puppies** was created on <t:1700000000:D> (<t:1700000000:R>), and has about 42 members."
+        );
+        let user = Text::UserInfo {
+            name: "Puppy",
+            created: 1_600_000_000,
+            joined: Some(1_700_000_000),
+        };
+        assert_eq!(
+            user.render(Lang::De),
+            "**Puppy** ist seit <t:1600000000:D> (<t:1600000000:R>) auf Discord und seit <t:1700000000:D> auf diesem Server."
+        );
+    }
+
+    #[test]
     fn answers_of_polls_and_dice() {
         assert_eq!(Text::poll_posted(true), Text::PollPosted);
         assert_eq!(Text::poll_posted(false), Text::PollFailed);
@@ -512,6 +650,7 @@ mod tests {
              - `?info`: what PuppyBot is, and which version runs\n\
              - `?dice 2d6+3`: rolls dice, e.g. also `d20` or `4d6kh3`\n\
              - `?poll Pizza? | Yes | No`: starts a poll for 24 hours\n\
+             - `?server`, `?user`: since when this server is there, and someone is here\n\
              - `?help`: these commands\n\
              Its slash commands, e.g. `/info`, are in Discord's list of commands."
         );

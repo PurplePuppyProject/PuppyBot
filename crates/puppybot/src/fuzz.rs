@@ -117,6 +117,14 @@ pub fn interaction(data: &[u8]) {
             assert!(text_command::is_valid_prefix(prefix), "{prefix:?}");
             only_asker(&[Text::PrefixSet { prefix }, Text::StorageFailed])
         }
+        Request::ServerInfo(_) => only_asker(&[
+            Text::ServerInfo {
+                name: &"x".repeat(100),
+                created: i64::MAX,
+                members: Some(u64::MAX),
+            },
+            Text::InfoFailed,
+        ]),
         Request::Poll(poll) => {
             check_poll(&poll);
             only_asker(&[Text::PollPosted, Text::PollFailed])

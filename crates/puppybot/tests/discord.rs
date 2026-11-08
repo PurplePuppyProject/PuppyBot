@@ -523,3 +523,48 @@ fn polls_in_the_channel() {
         posted[2].body
     );
 }
+
+#[test]
+fn the_server_and_people() {
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                slash("server", "[]", "en-US", 0),
+                message(1, "!user", GUILD, false),
+                message(2, "!server", GUILD, false),
+            ]
+        },
+        None,
+    );
+    let (_dir, bot) = start(&discord);
+    let commands = requests_to(&discord, COMMAND_ANSWER, 1);
+    let texts = requests_to(&discord, CHANNEL_MESSAGES, 2);
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert_eq!(
+        (commands.len(), texts.len()),
+        (1, 2),
+        "{commands:#?} {texts:#?}"
+    );
+    // From Discord's API, with the counts.
+    assert!(
+        discord
+            .requests()
+            .iter()
+            .any(|request| request.method == "GET"
+                && request.path == format!("/api/v10/guilds/{GUILD}")),
+        "{:#?}",
+        discord.requests()
+    );
+    let server = "**Purple Puppies** was created on <t:1682330837:D> (<t:1682330837:R>), and has about 42 members.";
+    assert!(commands[0].body.contains(server), "{}", commands[0].body);
+    assert!(texts[1].body.contains(server), "{}", texts[1].body);
+    assert!(
+        texts[0]
+            .body
+            .contains("**puppy** is on Discord since <t:1753856410:D> (<t:1753856410:R>), and on this server since <t:1767225600:D>."),
+        "{}",
+        texts[0].body
+    );
+}

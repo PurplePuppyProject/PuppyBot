@@ -34,9 +34,11 @@ PuppyBot registers its commands only on the servers in `guilds`, and leaves any 
 | `/settings language` | Shows the language in which PuppyBot writes to everyone on the server, or changes it with `to`: German or English, by default English. Only for people who may manage the server |
 | `/dice`, in German `/würfel` | Rolls [dice](#dice), e.g. `2d6+3`, for everyone in the channel to see; with `secret`, only for the person who asked |
 | `/poll`, in German `/umfrage` | Posts a [poll](#polls) in the channel, which Discord shows and counts |
+| `/server` | Shows when the server was created, and about how many members it has |
+| `/user`, in German `/nutzer` | Shows since when someone, by default the person who asked, is on Discord and on the server |
 | `/settings prefix` | Shows the prefix of the text commands on the server, or changes it with `to`: 1 to 5 characters of ASCII that one can see, but no spaces and none of `` < > @ # : / ` ``, by default `!`. Only for people who may manage the server |
 
-PuppyBot's answers are shown only to the person who asked, except those of `/dice`, and mention nobody. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
+PuppyBot's answers are shown only to the person who asked, except those of `/dice`, and mention nobody. Dates are Discord's timestamps, which Discord shows in the language and time zone of each reader. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
 
 Discord shows `/settings` only to people with the permission "Manage Server" or "Administrator". The server's admins can allow it to others in the server settings (Integrations), but PuppyBot answers only those who have one of the two permissions.
 
@@ -49,6 +51,8 @@ Messages that start with the prefix of the server, `!` unless someone chose anot
 | `!info` | Shows what PuppyBot is, which version runs, and where its code is |
 | `!dice`, `!roll`, `!würfel` | Rolls [dice](#dice), e.g. `!würfel 2W6+3`, one die with six sides without an expression |
 | `!poll`, `!umfrage` | Posts a [poll](#polls), e.g. `!umfrage Pizza oder Pasta? \| Pizza \| Pasta` |
+| `!server` | Shows when the server was created, and about how many members it has |
+| `!user`, `!nutzer` | Shows since when the first person that the message mentions, or its author, is on Discord and on the server |
 | `!help`, `!hilfe` | Shows the text commands and the prefix |
 
 - The names work in any case, e.g. `!Hilfe`, and directly after the prefix: `! info` is no command.

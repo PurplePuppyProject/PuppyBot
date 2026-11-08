@@ -3,6 +3,7 @@
 
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
+use std::error::Error as StdError;
 use std::fmt;
 use std::time::Duration;
 
@@ -20,8 +21,10 @@ use twilight_model::application::interaction::Interaction;
 use twilight_model::channel::Message;
 use twilight_model::channel::message::{AllowedMentions, MessageType};
 use twilight_model::gateway::payload::incoming::Ready;
+use twilight_model::guild::Guild;
 use twilight_model::id::Id;
 use twilight_model::id::marker::{ChannelMarker, GuildMarker, MessageMarker};
+use twilight_model::util::Timestamp;
 
 use crate::commands::{self, Audience, Request};
 use crate::config::DiscordConfig;
@@ -246,6 +249,7 @@ impl Bot {
         channel: Option<Id<ChannelMarker>>,
     ) -> (String, Audience) {
         let content = match request {
+            Request::ServerInfo(guild) => server_text(self.server(guild).await, lang),
             Request::Poll(poll) => {
                 let posted = match channel {
                     Some(channel) => self.post_poll(&poll, channel, None).await,
@@ -305,6 +309,17 @@ impl Bot {
             },
         };
         (content, Audience::Asker)
+    }
+
+    /// The server `guild`, as Discord says, with about how many members it has.
+    async fn server(&self, guild: Id<GuildMarker>) -> Result<Guild, Box<dyn StdError>> {
+        Ok(self
+            .http
+            .guild(guild)
+            .with_counts(true)
+            .await?
+            .model()
+            .await?)
     }
 
     /// Posts `poll` in `channel`, as a reply to `reply_to` if given, and returns whether it
@@ -371,6 +386,8 @@ impl Bot {
                 Ok(dice) => self.rolled(&dice, lang),
                 Err(error) => Text::dice_error(error).render(lang),
             },
+            TextCommand::Server => server_text(self.server(guild).await, lang),
+            TextCommand::User => user_text(message, lang),
             // The poll is the answer.
             TextCommand::Poll => match Poll::parse(arguments) {
                 Ok(poll) => {
@@ -418,6 +435,44 @@ impl Bot {
             }
         }
     }
+}
+
+/// The answer to /server and the text command server, in `lang`, of what Discord said about
+/// the server.
+fn server_text(server: Result<Guild, Box<dyn StdError>>, lang: Lang) -> String {
+    match server {
+        Ok(server) => Text::ServerInfo {
+            name: &server.name,
+            created: commands::created(server.id.get()),
+            members: server.approximate_member_count,
+        }
+        .render(lang),
+        Err(error) => {
+            tracing::warn!("can't get the details of the server: {error}");
+            Text::InfoFailed.render(lang)
+        }
+    }
+}
+
+/// The answer to the text command user, in `lang`: since when the first person that `message`
+/// mentions, but no bot, e.g. PuppyBot, or else its author, is on Discord and on the server.
+fn user_text(message: &Message, lang: Lang) -> String {
+    let (name, id, member) =
+        if let Some(mention) = message.mentions.iter().find(|mention| !mention.bot) {
+            (mention.name.as_str(), mention.id, mention.member.as_ref())
+        } else {
+            let author = &message.author;
+            let name = author.global_name.as_deref().unwrap_or(&author.name);
+            (name, author.id, message.member.as_ref())
+        };
+    Text::UserInfo {
+        name,
+        created: commands::created(id.get()),
+        joined: member
+            .and_then(|member| member.joined_at)
+            .map(Timestamp::as_secs),
+    }
+    .render(lang)
 }
 
 /// The body of a message with `poll`, which mentions nobody, as a reply to `reply_to` if given.
@@ -640,6 +695,73 @@ mod tests {
                 failed
             );
         });
+    }
+
+    /// A server, as Discord's API sends it with its counts.
+    pub(crate) const SERVER: &str = r#"{"id": "1100000000000000001", "name": "Purple Puppies",
+        "icon": null, "owner_id": "1400000000000000005", "afk_channel_id": null,
+        "afk_timeout": 300, "verification_level": 0, "default_message_notifications": 0,
+        "explicit_content_filter": 0, "roles": [], "emojis": [], "features": [],
+        "mfa_level": 0, "application_id": null, "system_channel_id": null,
+        "system_channel_flags": 0, "rules_channel_id": null, "vanity_url_code": null,
+        "description": null, "banner": null, "premium_tier": 0, "preferred_locale": "de",
+        "public_updates_channel_id": null, "nsfw_level": 0, "premium_progress_bar_enabled": false,
+        "stickers": [], "approximate_member_count": 42, "approximate_presence_count": 7}"#;
+
+    #[test]
+    fn the_server_and_its_members() {
+        let server = serde_json::from_str(SERVER).map_err(Into::into);
+        assert_eq!(
+            server_text(server, Lang::En),
+            "**Purple Puppies** was created on <t:1682330837:D> (<t:1682330837:R>), and has about 42 members."
+        );
+        in_runtime(async {
+            let failed = server_text(Err("no answer".into()), Lang::De);
+            assert_eq!(failed, Text::InfoFailed.render(Lang::De));
+            // With an API that fails.
+            let bot = bot(Box::new(Storage::in_memory()));
+            assert_eq!(
+                bot.execute(Request::ServerInfo(Id::new(GUILD)), Lang::En, None)
+                    .await,
+                (Text::InfoFailed.render(Lang::En), Audience::Asker)
+            );
+        });
+    }
+
+    #[test]
+    fn people_and_since_when_they_are_here() {
+        let joined = r#""member": {"deaf": false, "mute": false, "flags": 0, "roles": [],
+            "joined_at": "2026-01-01T00:00:00.000000+00:00"}"#;
+        let mut message: Message = serde_json::from_str(&format!(
+            r#"{{"id": "1300000000000000010", "channel_id": "1300000000000000004",
+            "guild_id": "{GUILD}", "content": "!user", "type": 0, "flags": 0,
+            "author": {{"id": "1400000000000000005", "username": "puppy", "discriminator": "0",
+                "avatar": null, "global_name": "Puppy"}}, {joined},
+            "timestamp": "2026-11-08T12:00:00.000000+00:00", "edited_timestamp": null,
+            "tts": false, "mention_everyone": false, "mention_roles": [],
+            "mentions": [{{"id": "3", "username": "PuppyBot", "discriminator": "0",
+                "avatar": null, "bot": true, "public_flags": 0}}],
+            "attachments": [], "embeds": [], "components": [], "pinned": false}}"#
+        ))
+        .unwrap();
+        // The author, as PuppyBot is a bot.
+        assert_eq!(
+            user_text(&message, Lang::En),
+            "**Puppy** is on Discord since <t:1753856410:D> (<t:1753856410:R>), and on this server since <t:1767225600:D>."
+        );
+        // Someone else.
+        message.mentions = serde_json::from_str(&format!(
+            r#"[{{"id": "1100000000000000001", "username": "rex", "discriminator": "0",
+                "avatar": null, "bot": false, "public_flags": 0, {joined}}}]"#
+        ))
+        .unwrap();
+        assert_eq!(
+            user_text(&message, Lang::En),
+            "**rex** is on Discord since <t:1682330837:D> (<t:1682330837:R>), and on this server since <t:1767225600:D>."
+        );
+        message.mentions.clear();
+        message.member = None;
+        assert!(user_text(&message, Lang::De).ends_with("auf Discord."));
     }
 
     #[test]

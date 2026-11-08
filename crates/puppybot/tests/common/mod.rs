@@ -456,6 +456,17 @@ async fn connection(stream: TcpStream, script: Arc<Vec<Send>>, received: Arc<Mut
     let _ = socket.close().await;
 }
 
+/// The server [`GUILD`], as Discord's API sends it with its counts.
+const SERVER: &str = r#"{"id": "1100000000000000001", "name": "Purple Puppies", "icon": null,
+    "owner_id": "1400000000000000005", "afk_channel_id": null, "afk_timeout": 300,
+    "verification_level": 0, "default_message_notifications": 0, "explicit_content_filter": 0,
+    "roles": [], "emojis": [], "features": [], "mfa_level": 0, "application_id": null,
+    "system_channel_id": null, "system_channel_flags": 0, "rules_channel_id": null,
+    "vanity_url_code": null, "description": null, "banner": null, "premium_tier": 0,
+    "preferred_locale": "de", "public_updates_channel_id": null, "nsfw_level": 0,
+    "premium_progress_bar_enabled": false, "stickers": [], "approximate_member_count": 42,
+    "approximate_presence_count": 7}"#;
+
 /// Records a request to the API, and answers it as Discord would, or with `failing`.
 async fn answer(
     request: hyper::Request<Incoming>,
@@ -473,6 +484,7 @@ async fn answer(
     let (status, reply) = match failing {
         Some(status) => (status, r#"{"message": "Invalid Form Body", "code": 50035}"#),
         None if path.ends_with("/commands") => (200, "[]"),
+        None if method == "GET" && path.starts_with("/api/v10/guilds/") => (200, SERVER),
         None => (204, ""),
     };
     requests
