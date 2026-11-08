@@ -8,3 +8,4 @@
 
 pub mod i18n;
 pub mod text;
+pub mod text_command;

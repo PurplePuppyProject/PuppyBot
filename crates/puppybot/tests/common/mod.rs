@@ -207,11 +207,11 @@ pub fn guild_create(guild: u64) -> Send {
     )
 }
 
-/// /settings language on [`GUILD`], with `to` if given, by someone with the locale `locale` and
-/// the permissions `permissions`.
-pub fn settings_language(to: Option<&str>, locale: &str, permissions: u64) -> Send {
-    let to = to.map_or_else(String::new, |code| {
-        format!(r#"{{"name": "to", "type": 3, "value": "{code}"}}"#)
+/// /settings `subcommand` on [`GUILD`], with `to` if given, by someone with the locale
+/// `locale` and the permissions `permissions`. PuppyBot answers it at [`SETTINGS_ANSWER`].
+pub fn settings(subcommand: &str, to: Option<&str>, locale: &str, permissions: u64) -> Send {
+    let to = to.map_or_else(String::new, |value| {
+        format!(r#"{{"name": "to", "type": 3, "value": "{value}"}}"#)
     });
     Send::Dispatch(
         "INTERACTION_CREATE",
@@ -224,7 +224,40 @@ pub fn settings_language(to: Option<&str>, locale: &str, permissions: u64) -> Se
                 "permissions": "{permissions}", "user": {{"id": "1400000000000000005",
                 "username": "puppy", "discriminator": "0", "avatar": null}}}},
             "data": {{"id": "1200000000000000007", "name": "settings", "type": 1,
-                "options": [{{"name": "language", "type": 1, "options": [{to}]}}]}}}}"#
+                "options": [{{"name": "{subcommand}", "type": 1, "options": [{to}]}}]}}}}"#
+        ),
+    )
+}
+
+/// Where PuppyBot answers [`settings`].
+pub const SETTINGS_ANSWER: &str =
+    "POST /api/v10/interactions/1200000000000000006/settings-token/callback";
+
+/// The channel of the messages of the tests, see [`message`].
+pub const CHANNEL: u64 = 1_300_000_000_000_000_004;
+
+/// Where PuppyBot writes to [`CHANNEL`], e.g. its answers to text commands.
+pub const CHANNEL_MESSAGES: &str = "POST /api/v10/channels/1300000000000000004/messages";
+
+/// How messages mention PuppyBot, the user of [`ready`].
+pub const MENTION: &str = "<@1200000000000000003>";
+
+/// The event `MESSAGE_CREATE` of the message `id` with `content` in [`CHANNEL`] on the server
+/// `guild`, by a person, or by a bot.
+pub fn message(id: u64, content: &str, guild: u64, bot: bool) -> Send {
+    let content = serde_json::to_string(content).unwrap();
+    Send::Dispatch(
+        "MESSAGE_CREATE",
+        format!(
+            r#"{{"id": "{id}", "channel_id": "{CHANNEL}", "guild_id": "{guild}",
+            "content": {content}, "type": 0, "flags": 0,
+            "author": {{"id": "1400000000000000005", "username": "puppy", "discriminator": "0",
+                "avatar": null, "bot": {bot}}},
+            "member": {{"deaf": false, "mute": false, "flags": 0, "roles": [],
+                "joined_at": "2026-01-01T00:00:00.000000+00:00"}},
+            "timestamp": "2026-11-08T12:00:00.000000+00:00", "edited_timestamp": null,
+            "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+            "attachments": [], "embeds": [], "components": [], "pinned": false}}"#
         ),
     )
 }

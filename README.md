@@ -6,7 +6,7 @@
 
 A Discord bot of the Purple Puppy Project, written in Rust; a Signal bot may follow.
 
-**Status: being built.** So far PuppyBot connects to Discord, works only on the servers that its [configuration](#configuration) names, answers [`/info`](#commands), in German or English, and keeps the language of each server in its database. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
+**Status: being built.** So far PuppyBot connects to Discord, works only on the servers that its [configuration](#configuration) names, answers [`/info`](#commands) and text commands such as `!info`, in German or English, and keeps the language and the prefix of each server in its database. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
 
 The project holds itself to:
 
@@ -20,8 +20,8 @@ PuppyBot works only on servers that you choose, so it is a private bot: only you
 
 1. Create an application with **New Application**.
 2. On **Installation**, check only **Guild Install** under **Installation Contexts**, and set the **Install Link** to **None**: a private bot can't have one.
-3. On **Bot**, turn **Public Bot** off, and get the token with **Reset Token**. It goes into the token file, see [Docker Compose](#docker-compose). PuppyBot needs none of the privileged intents on that page.
-4. On **OAuth2**, let the **URL Generator** make a link with the scopes `bot` and `applications.commands`, as a guild install and without permissions. Open it to add the bot to a server; you need the permission "Manage Server" there.
+3. On **Bot**, turn **Public Bot** off, and get the token with **Reset Token**. It goes into the token file, see [Docker Compose](#docker-compose). Under **Privileged Gateway Intents**, turn on **Message Content Intent**, which the [text commands](#text-commands) need: without it, Discord closes the connection with the code 4014 and PuppyBot stops. Under 100 servers, Discord allows it without a review.
+4. On **OAuth2**, let the **URL Generator** make a link with the scopes `bot` and `applications.commands`, as a guild install, and the permissions **View Channels**, **Send Messages** and **Read Message History**, with which PuppyBot answers text commands in the channel. Open it to add the bot to a server; you need the permission "Manage Server" there. On a server that has the bot already, give it these permissions, e.g. by opening the new link.
 5. In Discord, turn on the developer mode (User Settings, Advanced), choose **Copy Server ID** in the menu of the server, and put the ID into `guilds` in the [configuration](#configuration).
 
 PuppyBot registers its commands only on the servers in `guilds`, and leaves any other server it is on, with a warning in its log.
@@ -32,10 +32,25 @@ PuppyBot registers its commands only on the servers in `guilds`, and leaves any 
 |---|---|
 | `/info` | Shows what PuppyBot is, which version runs, and where its code is |
 | `/settings language` | Shows the language in which PuppyBot writes to everyone on the server, or changes it with `to`: German or English, by default English. Only for people who may manage the server |
+| `/settings prefix` | Shows the prefix of the text commands on the server, or changes it with `to`: 1 to 5 characters of ASCII that one can see, but no spaces and none of `` < > @ # : / ` ``, by default `!`. Only for people who may manage the server |
 
 PuppyBot's answers are shown only to the person who asked, and mention nobody. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
 
 Discord shows `/settings` only to people with the permission "Manage Server" or "Administrator". The server's admins can allow it to others in the server settings (Integrations), but PuppyBot answers only those who have one of the two permissions.
+
+### Text Commands
+
+Messages that start with the prefix of the server, `!` unless someone chose another, or with a mention of PuppyBot, are text commands, e.g. `!info` or `@PuppyBot info`. A mention alone shows the help.
+
+| Text command | What it does |
+|---|---|
+| `!info` | Shows what PuppyBot is, which version runs, and where its code is |
+| `!help`, `!hilfe` | Shows the text commands and the prefix |
+
+- The names work in any case, e.g. `!Hilfe`, and directly after the prefix: `! info` is no command.
+- PuppyBot answers in the channel, as a reply that mentions nobody, in the language of the server, as everyone in the channel sees it.
+- It ignores the messages of bots and webhooks, and commands it doesn't know, which may be for other bots with the same prefix.
+- It reads the text of every message on its servers, to find the commands, but keeps none of it.
 
 ## Docker
 
@@ -115,7 +130,7 @@ PuppyBot reads its settings from a [TOML](https://toml.io) file: `/etc/puppybot/
 PuppyBot runs until `SIGTERM`, which `docker stop` and service managers send, or `SIGINT`, from Ctrl+C, stops it. Then it closes the connection to Discord, and waits for Discord to close it too, for at most 5 seconds, within the 10 seconds that `docker stop` waits. If the connection breaks before, PuppyBot connects again by itself. It logs to stderr, which Docker collects. Its exit status is:
 
 - 0 when a signal stopped it, or after `--version` or `--help`;
-- 1 if it can't run, e.g. as the token file is missing or holds no valid token, as the system has no CA certificates, as the database can't be used, or as Discord closed the connection for good, e.g. with the code 4004, as it rejected the token;
+- 1 if it can't run, e.g. as the token file is missing or holds no valid token, as the system has no CA certificates, as the database can't be used, or as Discord closed the connection for good, e.g. with the code 4004, as it rejected the token, or 4014, as the Developer Portal doesn't allow the Message Content Intent;
 - 2 for a command line, a configuration file or a `RUST_LOG` that PuppyBot can't use.
 
 ## Project Layout

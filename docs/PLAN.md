@@ -47,6 +47,14 @@ Decided in `feature/storage`:
 - **`/settings`** is for people with "Manage Server" or "Administrator": Discord shows it only to them (`default_member_permissions`), and PuppyBot checks it again, as the server's admins can allow the command to others.
 - **The language of a server** is for what PuppyBot writes to everyone, e.g. welcome messages. Answers stay in the language of the person who asked.
 
+Decided in `feature/prefix_commands`, with the user:
+
+- **Text commands start with the prefix of the server or with a mention of PuppyBot,** e.g. `!info` or `@PuppyBot info`; a mention alone asks for help. This needs the privileged Message Content intent, and the permissions View Channels, Send Messages and Read Message History. PuppyBot reads every message on its servers for it, but keeps none.
+- **A prefix has 1 to 5 characters of ASCII that one can see,** none of `` < > @ # : / ` ``, which Discord uses for mentions, channels, emoji, slash commands and code. Characters that one can't see, and letters of other alphabets that look like others, can't be in a prefix. The default is `!`.
+- **Unknown text commands get no answer,** as other bots often use the same prefix. The names work in any case, in English and German, e.g. `help` and `hilfe`.
+- **Text commands are answered in the channel,** as a reply without mentions, in the language of the server, as everyone there sees them; slash commands stay ephemeral, in the language of the person.
+- **PuppyBot reads the prefix for each message,** from the database: a read is short in redb. Floods of commands are held back only by the rate limits of Discord, which twilight keeps; limits of its own per person may come later.
+
 ## Structure
 
 A Cargo workspace:
@@ -70,7 +78,7 @@ One branch and pull request each, in this order:
 1. `feature/configuration`, done: the TOML configuration, secrets from files, logging, how the program starts and stops (signals, exit statuses), and an example for Docker Compose.
 2. `feature/discord_connection`, done: twilight's gateway with the intents needed, reconnecting, the servers of the configuration, the slash commands registered with German and English descriptions, and a first command, `/info`.
 3. `feature/storage`, done: redb for the settings of each server, with a version of the stored data for later changes. The first setting: the language of each server, `/settings language`, for people with "Manage Server", in German or English, for the texts that aren't addressed to one person.
-4. `feature/prefix_commands`: the platform-neutral parser of prefix commands in `puppybot-core`, with a fuzz target, and a prefix for each server.
+4. `feature/prefix_commands`, done: the platform-neutral parser of prefix commands in `puppybot-core`, with a fuzz target, and a prefix for each server.
 5. `feature/utility_commands`: dice (an expression parser with a fuzz target), polls, info commands, quotes and small games.
 6. `feature/onboarding`: welcome messages, self-roles, confirming the rules, events and reminders.
 7. `feature/feeds`: RSS and Atom, YouTube and GitHub, with the protection above; then `feature/twitch`.

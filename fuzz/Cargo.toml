@@ -38,6 +38,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "text_command"
+path = "fuzz_targets/text_command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "token_file"
 path = "fuzz_targets/token_file.rs"
 test = false

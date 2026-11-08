@@ -12,6 +12,7 @@ use std::fmt;
 use std::path::Path;
 
 use puppybot_core::i18n::Lang;
+use puppybot_core::text_command;
 use redb::{Builder, Database, ReadableDatabase as _, ReadableTable as _, TableDefinition};
 use twilight_model::id::Id;
 use twilight_model::id::marker::GuildMarker;
@@ -29,6 +30,9 @@ const VERSION_KEY: &str = "version";
 /// The language chosen for each server, by the server's ID, as its [`Lang::code`].
 const LANGUAGES: TableDefinition<u64, &str> = TableDefinition::new("languages");
 
+/// The prefix of the text commands chosen for each server, by the server's ID.
+const PREFIXES: TableDefinition<u64, &str> = TableDefinition::new("prefixes");
+
 /// The settings of the servers. [`Storage`] keeps them; tests put in settings that fail.
 pub trait Settings {
     /// The language chosen for `guild`, none if nobody chose one yet.
@@ -44,6 +48,21 @@ pub trait Settings {
     ///
     /// [`Error`] if the settings can't be saved, e.g. as the disk is full.
     fn set_language(&self, guild: Id<GuildMarker>, lang: Lang) -> Result<(), Error>;
+
+    /// The prefix of the text commands chosen for `guild`, none if nobody chose one yet.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] if the settings can't be read.
+    fn prefix(&self, guild: Id<GuildMarker>) -> Result<Option<String>, Error>;
+
+    /// Chooses `prefix` for the text commands on `guild`, which
+    /// [`text_command::is_valid_prefix`] accepts.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] if the settings can't be saved, e.g. as the disk is full.
+    fn set_prefix(&self, guild: Id<GuildMarker>, prefix: &str) -> Result<(), Error>;
 }
 
 /// The database.
@@ -123,7 +142,15 @@ impl Settings for Storage {
     }
 
     fn set_language(&self, guild: Id<GuildMarker>, lang: Lang) -> Result<(), Error> {
-        set_language(&self.database, guild.get(), lang).map_err(Error::Access)
+        set(&self.database, LANGUAGES, guild.get(), lang.code()).map_err(Error::Access)
+    }
+
+    fn prefix(&self, guild: Id<GuildMarker>) -> Result<Option<String>, Error> {
+        prefix(&self.database, guild.get()).map_err(Error::Access)
+    }
+
+    fn set_prefix(&self, guild: Id<GuildMarker>, prefix: &str) -> Result<(), Error> {
+        set(&self.database, PREFIXES, guild.get(), prefix).map_err(Error::Access)
     }
 }
 
@@ -145,7 +172,9 @@ fn prepare(database: &Database) -> Result<u64, redb::Error> {
             write.open_table(META)?.insert(VERSION_KEY, VERSION)?;
         }
     }
+    // Also in a database of an earlier PuppyBot of this version, which didn't have all yet.
     write.open_table(LANGUAGES)?;
+    write.open_table(PREFIXES)?;
     write.commit()?;
     Ok(VERSION)
 }
@@ -159,10 +188,25 @@ fn language(database: &Database, guild: u64) -> Result<Option<Lang>, redb::Error
     Ok(code.and_then(|code| Lang::from_code(code.value())))
 }
 
-/// Chooses `lang` for the server `guild`.
-fn set_language(database: &Database, guild: u64, lang: Lang) -> Result<(), redb::Error> {
+/// The prefix chosen for the server `guild`. One that this PuppyBot wouldn't take counts as none.
+fn prefix(database: &Database, guild: u64) -> Result<Option<String>, redb::Error> {
+    let read = database.begin_read()?;
+    let prefixes = read.open_table(PREFIXES)?;
+    let prefix = prefixes.get(guild)?;
+    Ok(prefix
+        .map(|prefix| prefix.value().to_owned())
+        .filter(|prefix| text_command::is_valid_prefix(prefix)))
+}
+
+/// Stores `value` for the server `guild` in `table`.
+fn set(
+    database: &Database,
+    table: TableDefinition<u64, &str>,
+    guild: u64,
+    value: &str,
+) -> Result<(), redb::Error> {
     let write = database.begin_write()?;
-    write.open_table(LANGUAGES)?.insert(guild, lang.code())?;
+    write.open_table(table)?.insert(guild, value)?;
     write.commit()?;
     Ok(())
 }
@@ -185,6 +229,43 @@ mod tests {
         assert_eq!(storage.language(GUILD).unwrap(), Some(Lang::En));
         // Each server has its own.
         assert_eq!(storage.language(Id::new(2)).unwrap(), None);
+    }
+
+    #[test]
+    fn prefixes_of_servers() {
+        let storage = Storage::in_memory();
+        assert_eq!(storage.prefix(GUILD).unwrap(), None);
+        storage.set_prefix(GUILD, "pb?").unwrap();
+        assert_eq!(storage.prefix(GUILD).unwrap().as_deref(), Some("pb?"));
+        assert_eq!(storage.prefix(Id::new(2)).unwrap(), None);
+        // One that this PuppyBot wouldn't take, e.g. from a damaged file, counts as none.
+        storage.set_prefix(GUILD, "a b").unwrap();
+        assert_eq!(storage.prefix(GUILD).unwrap(), None);
+    }
+
+    #[test]
+    fn a_database_without_all_tables_gets_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("puppybot.redb");
+        // As the first PuppyBot with a database stored it: the version, and only the languages.
+        let database = Database::create(&path).unwrap();
+        let write = database.begin_write().unwrap();
+        write
+            .open_table(META)
+            .unwrap()
+            .insert(VERSION_KEY, VERSION)
+            .unwrap();
+        write
+            .open_table(LANGUAGES)
+            .unwrap()
+            .insert(GUILD.get(), "de")
+            .unwrap();
+        write.commit().unwrap();
+        drop(database);
+
+        let storage = Storage::open(&path).unwrap();
+        assert_eq!(storage.language(GUILD).unwrap(), Some(Lang::De));
+        assert_eq!(storage.prefix(GUILD).unwrap(), None);
     }
 
     #[test]
