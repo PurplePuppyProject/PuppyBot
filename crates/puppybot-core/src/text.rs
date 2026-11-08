@@ -132,6 +132,42 @@ pub enum Text<'a> {
     InfoFailed,
 }
 
+/// The most characters of a name in a text, e.g. of a person or a server: Discord's names are
+/// shorter, but PuppyBot doesn't count on that.
+pub const MAX_NAME: usize = 100;
+
+/// The start of `text`, of at most `max` characters.
+#[must_use]
+pub fn clip(text: &str, max: usize) -> &str {
+    text.char_indices()
+        .nth(max)
+        .and_then(|(end, _)| text.get(..end))
+        .unwrap_or(text)
+}
+
+/// What someone else wrote, e.g. a name, as PuppyBot repeats it: the start of `text`, of at most
+/// `max` characters, which Discord shows as it is, on one line. A backslash goes before each
+/// character that Discord reads as Markdown, a link, an emoji or a mention, e.g. `*`, `[`, `:`
+/// and `<`; a space takes the place of line breaks and other control characters; and the marks
+/// that turn the direction of the writing are left out. So a name can't hide a link, a mention or
+/// another text in PuppyBot's messages.
+#[must_use]
+pub fn literal(text: &str, max: usize) -> String {
+    let mut literal = String::new();
+    for character in clip(text, max).chars() {
+        match character {
+            '\\' | '*' | '_' | '~' | '`' | '|' | '<' | '>' | '[' | ']' | ':' | '@' => {
+                literal.push('\\');
+                literal.push(character);
+            }
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {}
+            character if character.is_control() => literal.push(' '),
+            character => literal.push(character),
+        }
+    }
+    literal
+}
+
 impl Text<'_> {
     /// The answer to an expression of dice that PuppyBot doesn't roll, as of `error`.
     #[must_use]
@@ -400,6 +436,7 @@ impl Text<'_> {
                 let members = members.map_or_else(String::new, |members| {
                     format!(" und hat etwa {members} Mitglieder")
                 });
+                let name = literal(name, MAX_NAME);
                 format!("**{name}** entstand am <t:{created}:D> (<t:{created}:R>){members}.")
             }
             Self::UserInfo {
@@ -410,6 +447,7 @@ impl Text<'_> {
                 let joined = joined.map_or_else(String::new, |joined| {
                     format!(" und seit <t:{joined}:D> auf diesem Server")
                 });
+                let name = literal(name, MAX_NAME);
                 format!("**{name}** ist seit <t:{created}:D> (<t:{created}:R>) auf Discord{joined}.")
             }
             Self::InfoFailed => {
@@ -549,6 +587,7 @@ impl Text<'_> {
                 let members = members.map_or_else(String::new, |members| {
                     format!(", and has about {members} members")
                 });
+                let name = literal(name, MAX_NAME);
                 format!("**{name}** was created on <t:{created}:D> (<t:{created}:R>){members}.")
             }
             Self::UserInfo {
@@ -559,6 +598,7 @@ impl Text<'_> {
                 let joined = joined.map_or_else(String::new, |joined| {
                     format!(", and on this server since <t:{joined}:D>")
                 });
+                let name = literal(name, MAX_NAME);
                 format!("**{name}** is on Discord since <t:{created}:D> (<t:{created}:R>){joined}.")
             }
             Self::InfoFailed => {
@@ -595,6 +635,49 @@ mod tests {
                 assert!(description.chars().count() <= 100, "{description}");
             }
         }
+    }
+
+    #[test]
+    fn what_others_wrote() {
+        assert_eq!(clip("Pfötchen", 4), "Pföt");
+        assert_eq!(clip("Pfötchen", 8), "Pfötchen");
+        assert_eq!(clip("Pfötchen", 100), "Pfötchen");
+        assert_eq!(clip("", 3), "");
+        assert_eq!(literal("Pfötchen 🐾", MAX_NAME), "Pfötchen 🐾");
+        assert_eq!(literal("Pfötchen", 4), "Pföt");
+        // Markdown, links, emoji and mentions as they are.
+        assert_eq!(
+            literal(r"**a** _b_ ~~c~~ `d` ||e|| > f \", MAX_NAME),
+            r"\*\*a\*\* \_b\_ \~\~c\~\~ \`d\` \|\|e\|\| \> f \\"
+        );
+        assert_eq!(
+            literal("[Nitro](https://example.com) <@1> @everyone :x:", MAX_NAME),
+            r"\[Nitro\](https\://example.com) \<\@1\> \@everyone \:x\:"
+        );
+        // On one line, and in the direction of the rest of the text.
+        assert_eq!(literal("a\nb\r\tc\u{7}", MAX_NAME), "a b  c ");
+        assert_eq!(literal("a\u{202e}b\u{2067}c\u{2069}", MAX_NAME), "abc");
+        // Clipped before the backslashes go in.
+        assert_eq!(
+            literal(&"*".repeat(MAX_NAME + 1), MAX_NAME),
+            r"\*".repeat(MAX_NAME)
+        );
+        let long = "ä".repeat(MAX_NAME + 50);
+        let user = Text::UserInfo {
+            name: &long,
+            created: 0,
+            joined: None,
+        };
+        assert!(user.render(Lang::En).chars().count() < MAX_NAME + 100);
+        let server = Text::ServerInfo {
+            name: "**Puppies** <@1>",
+            created: 0,
+            members: None,
+        };
+        assert_eq!(
+            server.render(Lang::De),
+            r"**\*\*Puppies\*\* \<\@1\>** entstand am <t:0:D> (<t:0:R>)."
+        );
     }
 
     #[test]

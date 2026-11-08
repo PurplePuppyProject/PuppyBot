@@ -75,6 +75,7 @@ Decided in `feature/info_commands`:
 - **`/server`** asks Discord's API for the server with its counts, `approximate_member_count`, when someone asks: a count from the gateway would be old soon, as PuppyBot doesn't get the members' events without the privileged intent Server Members.
 - **`/user`** takes the person and the date they joined from what Discord sends with the command or the message; no request is needed. When something came to Discord follows from its ID, which begins with the milliseconds since 2015.
 - **Dates are Discord's timestamps,** `<t:…:D>` and `<t:…:R>`, which Discord shows in the language and time zone of each reader.
+- **What others wrote, e.g. names, appears as it is:** the texts in `puppybot-core` clip it and put a backslash before each character that Discord reads as Markdown, a link, an emoji or a mention, so that a name like `[Nitro](https://…)` can't hide a link in PuppyBot's message. Line breaks become spaces, and the marks that turn the direction of the writing are left out.
 
 ## Structure
 

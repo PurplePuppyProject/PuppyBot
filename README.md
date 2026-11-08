@@ -38,7 +38,7 @@ PuppyBot registers its commands only on the servers in `guilds`, and leaves any 
 | `/user`, in German `/nutzer` | Shows since when someone, by default the person who asked, is on Discord and on the server |
 | `/settings prefix` | Shows the prefix of the text commands on the server, or changes it with `to`: 1 to 5 characters of ASCII that one can see, but no spaces and none of `` < > @ # : / ` ``, by default `!`. Only for people who may manage the server |
 
-PuppyBot's answers are shown only to the person who asked, except those of `/dice`, and mention nobody. Dates are Discord's timestamps, which Discord shows in the language and time zone of each reader. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
+PuppyBot's answers are shown only to the person who asked, except those of `/dice`, and mention nobody. Names and what else people wrote appear as they are, not as Markdown, links or mentions. Dates are Discord's timestamps, which Discord shows in the language and time zone of each reader. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
 
 Discord shows `/settings` only to people with the permission "Manage Server" or "Administrator". The server's admins can allow it to others in the server settings (Integrations), but PuppyBot answers only those who have one of the two permissions.
 
