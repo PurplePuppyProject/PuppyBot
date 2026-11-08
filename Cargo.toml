@@ -40,7 +40,7 @@ twilight-gateway = { version = "0.18.0", default-features = false, features = ["
 twilight-http = { version = "0.18.0", default-features = false, features = ["rustls-native-roots"] }
 twilight-model = "0.18.0"
 twilight-util = { version = "0.18.0", features = ["builder"] }
-# For the tests: Discord on this machine, see crates/puppybot/tests/discord/.
+# For the tests: Discord on this machine, see crates/puppybot/tests/common.
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["http1", "server"] }
