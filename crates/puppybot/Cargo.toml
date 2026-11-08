@@ -35,6 +35,8 @@ hyper-util.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
 tokio-websockets.workspace = true
+# Checks the commands as Discord does, which the fake Discord of the tests doesn't.
+twilight-validate.workspace = true
 
 [lints]
 workspace = true

@@ -11,6 +11,7 @@ use puppybot_core::dice::Dice;
 use puppybot_core::games::{Coin, GameText, Guessing, Hand, Hint};
 use puppybot_core::i18n::Lang;
 use puppybot_core::poll::Poll;
+use puppybot_core::quotes::{self, QuoteText};
 use puppybot_core::text::Text;
 use puppybot_core::text_command::{self, TextCommand};
 use secrecy::{ExposeSecret, SecretString};
@@ -30,7 +31,7 @@ use twilight_model::util::Timestamp;
 use crate::commands::{self, Answer, Audience, Request};
 use crate::config::DiscordConfig;
 use crate::shutdown::{Signals, Stop};
-use crate::storage::Settings;
+use crate::storage::{Deleted, Quote, Saved, Store};
 
 /// What PuppyBot gets from the gateway: events of its servers, and the messages on them with
 /// their text, for the text commands. Slash commands come without an intent. Discord counts
@@ -45,7 +46,9 @@ const INTENTS: Intents = Intents::GUILDS
 const EVENTS: EventTypeFlags = EventTypeFlags::READY
     .union(EventTypeFlags::GUILD_CREATE)
     .union(EventTypeFlags::INTERACTION_CREATE)
-    .union(EventTypeFlags::MESSAGE_CREATE);
+    .union(EventTypeFlags::MESSAGE_CREATE)
+    .union(EventTypeFlags::MESSAGE_DELETE)
+    .union(EventTypeFlags::MESSAGE_DELETE_BULK);
 
 /// How long PuppyBot waits for Discord to close the connection after a signal.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -104,9 +107,9 @@ pub struct Discord {
 
 impl Discord {
     /// The connection with `token`, as `config` says, after [`prepare_tls`], with the settings
-    /// of the servers in `settings`. It connects once [`Self::run`] runs.
+    /// and the quotes of the servers in `store`. It connects once [`Self::run`] runs.
     #[must_use]
-    pub fn new(config: &DiscordConfig, token: &SecretString, settings: Box<dyn Settings>) -> Self {
+    pub fn new(config: &DiscordConfig, token: &SecretString, store: Box<dyn Store>) -> Self {
         let token = token.expose_secret().to_owned();
         let mut http = Client::builder()
             .token(token.clone())
@@ -124,7 +127,7 @@ impl Discord {
             bot: Bot {
                 http: http.build(),
                 guilds: config.guilds.iter().map(|&guild| Id::from(guild)).collect(),
-                settings,
+                store,
                 mentions: OnceCell::new(),
                 die: crate::random::die,
                 games: RefCell::new(BTreeMap::new()),
@@ -171,8 +174,8 @@ struct Bot {
     http: Client,
     /// The servers of PuppyBot, from the configuration.
     guilds: BTreeSet<Id<GuildMarker>>,
-    /// The settings of the servers.
-    settings: Box<dyn Settings>,
+    /// The settings and the quotes of the servers.
+    store: Box<dyn Store>,
     /// How messages mention PuppyBot, once Discord said who it is.
     mentions: OnceCell<[String; 2]>,
     /// A die with so many sides, see [`crate::random::die`], or another one in tests.
@@ -188,6 +191,8 @@ impl Bot {
             Event::GuildCreate(guild) => self.joined(guild.id()).await,
             Event::InteractionCreate(interaction) => self.interaction(&interaction.0).await,
             Event::MessageCreate(message) => self.message(&message.message).await,
+            Event::MessageDelete(gone) => self.forget(gone.guild_id, &[gone.id]),
+            Event::MessageDeleteBulk(gone) => self.forget(gone.guild_id, &gone.ids),
             // Not wanted, see EVENTS.
             _ => {}
         }
@@ -280,6 +285,22 @@ impl Bot {
                 };
                 Text::poll_posted(posted).render(lang)
             }
+            Request::SaveQuote(guild, quote) => self.save_quote(guild, quote, lang),
+            Request::ShowQuote(guild, number) => {
+                let (content, shown) = self.show_quote(guild, number, lang);
+                let audience = if shown {
+                    Audience::Everyone
+                } else {
+                    Audience::Asker
+                };
+                return Answer::new(content, audience);
+            }
+            Request::DeleteQuote {
+                guild,
+                number,
+                asker,
+                may_manage,
+            } => self.delete_quote(guild, number, (!may_manage).then_some(asker), lang),
             Request::Roll { dice, secret } => {
                 let audience = if secret {
                     Audience::Asker
@@ -289,14 +310,14 @@ impl Bot {
                 return Answer::new(self.rolled(&dice, lang), audience);
             }
             Request::Answer(text) => text.render(lang),
-            Request::ShowLanguage(guild) => match self.settings.language(guild) {
+            Request::ShowLanguage(guild) => match self.store.language(guild) {
                 Ok(chosen) => Text::LanguageIs { chosen }.render(lang),
                 Err(error) => {
                     tracing::warn!(server = %guild, "can't read the language of the server from the database: {error}");
                     Text::StorageFailed.render(lang)
                 }
             },
-            Request::SetLanguage(guild, new) => match self.settings.set_language(guild, new) {
+            Request::SetLanguage(guild, new) => match self.store.set_language(guild, new) {
                 Ok(()) => {
                     tracing::info!(
                         server = %guild,
@@ -310,7 +331,7 @@ impl Bot {
                     Text::StorageFailed.render(lang)
                 }
             },
-            Request::ShowPrefix(guild) => match self.settings.prefix(guild) {
+            Request::ShowPrefix(guild) => match self.store.prefix(guild) {
                 Ok(chosen) => Text::PrefixIs {
                     chosen: chosen.as_deref(),
                 }
@@ -320,7 +341,7 @@ impl Bot {
                     Text::StorageFailed.render(lang)
                 }
             },
-            Request::SetPrefix(guild, prefix) => match self.settings.set_prefix(guild, prefix) {
+            Request::SetPrefix(guild, prefix) => match self.store.set_prefix(guild, prefix) {
                 Ok(()) => {
                     tracing::info!(server = %guild, prefix, "changed the prefix of the server");
                     Text::PrefixSet { prefix }.render(lang)
@@ -406,6 +427,113 @@ impl Bot {
             }
         };
         text.render(lang)
+    }
+
+    /// Saves `quote` on `guild`, if it is one, and returns the answer, in `lang`.
+    fn save_quote(&self, guild: Id<GuildMarker>, quote: Quote, lang: Lang) -> String {
+        let text = match quotes::quote(&quote.text) {
+            Ok(text) => text.to_owned(),
+            Err(error) => return QuoteText::error(error).render(lang),
+        };
+        let quote = Quote { text, ..quote };
+        match self.store.save_quote(guild, &quote) {
+            Ok(saved) => {
+                if let Saved::New(number) = saved {
+                    tracing::info!(server = %guild, number, "saved a quote");
+                }
+                saved_text(saved).render(lang)
+            }
+            Err(error) => {
+                tracing::warn!(server = %guild, "can't save a quote in the database: {error}");
+                Text::StorageFailed.render(lang)
+            }
+        }
+    }
+
+    /// The quote `number` of `guild`, or one at random, in `lang`, and whether it is one: a quote
+    /// is for everyone, what went wrong only for the person who asked.
+    fn show_quote(
+        &self,
+        guild: Id<GuildMarker>,
+        number: Option<u32>,
+        lang: Lang,
+    ) -> (String, bool) {
+        let mut die = self.die;
+        let found = match number {
+            Some(number) => self
+                .store
+                .quote(guild, number)
+                .map(|quote| quote.map(|quote| (number, quote))),
+            None => self.store.random_quote(guild, &mut die),
+        };
+        match found {
+            Ok(Some((number, quote))) => {
+                let link = format!(
+                    "https://discord.com/channels/{guild}/{}/{}",
+                    quote.channel, quote.message
+                );
+                let shown = QuoteText::Shown {
+                    number,
+                    author: &quote.name,
+                    said: commands::created(quote.message),
+                    text: &quote.text,
+                    link: &link,
+                };
+                (shown.render(lang), true)
+            }
+            Ok(None) => {
+                let missing = number.map_or(QuoteText::NoQuotes, |number| QuoteText::NoSuchQuote {
+                    number,
+                });
+                (missing.render(lang), false)
+            }
+            Err(error) => {
+                tracing::warn!(server = %guild, "can't read the quotes from the database: {error}");
+                (Text::StorageFailed.render(lang), false)
+            }
+        }
+    }
+
+    /// Deletes the quote `number` of `guild`, but only if `author` wrote it, if given, and
+    /// returns the answer, in `lang`.
+    fn delete_quote(
+        &self,
+        guild: Id<GuildMarker>,
+        number: u32,
+        author: Option<u64>,
+        lang: Lang,
+    ) -> String {
+        let text = match self.store.delete_quote(guild, number, author) {
+            Ok(Deleted::Yes) => {
+                tracing::info!(server = %guild, number, "deleted a quote");
+                QuoteText::Deleted { number }
+            }
+            Ok(Deleted::NotTheirs) => QuoteText::NotYours { number },
+            Ok(Deleted::Missing) => QuoteText::NoSuchQuote { number },
+            Err(error) => {
+                tracing::warn!(server = %guild, "can't delete a quote from the database: {error}");
+                return Text::StorageFailed.render(lang);
+            }
+        };
+        text.render(lang)
+    }
+
+    /// Messages that are gone, on `guild`: their quotes go with them.
+    fn forget(&self, guild: Option<Id<GuildMarker>>, messages: &[Id<MessageMarker>]) {
+        let Some(guild) = guild.filter(|guild| self.guilds.contains(guild)) else {
+            return;
+        };
+        for &message in messages {
+            match self.store.forget_message(guild, message) {
+                Ok(Some(number)) => {
+                    tracing::info!(server = %guild, number, "deleted a quote, as its message is gone");
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(server = %guild, "can't delete the quote of a deleted message from the database: {error}");
+                }
+            }
+        }
     }
 
     /// The server `guild`, as Discord says, with about how many members it has.
@@ -494,6 +622,7 @@ impl Bot {
                 let number = arguments.parse().ok();
                 self.guess(Some(message.channel_id), number, None, player, lang)
             }
+            TextCommand::Quote => self.show_quote(guild, arguments.parse().ok(), lang).0,
             // The poll is the answer.
             TextCommand::Poll => match Poll::parse(arguments) {
                 Ok(poll) => {
@@ -527,7 +656,7 @@ impl Bot {
     /// The prefix of the text commands on `guild`: the one chosen, or the default, also if the
     /// settings can't be read.
     fn prefix(&self, guild: Id<GuildMarker>) -> String {
-        match self.settings.prefix(guild) {
+        match self.store.prefix(guild) {
             Ok(chosen) => chosen.unwrap_or_else(|| text_command::DEFAULT_PREFIX.to_owned()),
             Err(error) => {
                 tracing::warn!(server = %guild, "can't read the prefix of the server from the database: {error}");
@@ -539,13 +668,22 @@ impl Bot {
     /// The language of `guild`: the one chosen, or the default, also if the settings can't be
     /// read.
     fn language(&self, guild: Id<GuildMarker>) -> Lang {
-        match self.settings.language(guild) {
+        match self.store.language(guild) {
             Ok(chosen) => chosen.unwrap_or_default(),
             Err(error) => {
                 tracing::warn!(server = %guild, "can't read the language of the server from the database: {error}");
                 Lang::default()
             }
         }
+    }
+}
+
+/// The answer to saving a quote, as `saved` says.
+const fn saved_text(saved: Saved) -> QuoteText<'static> {
+    match saved {
+        Saved::New(number) => QuoteText::Saved { number },
+        Saved::Already(number) => QuoteText::AlreadySaved { number },
+        Saved::Full => QuoteText::Full,
     }
 }
 
@@ -619,7 +757,7 @@ mod tests {
 
     use twilight_gateway::CloseFrame;
     use twilight_model::gateway::payload::incoming::{
-        GuildCreate, InteractionCreate, MessageCreate,
+        GuildCreate, InteractionCreate, MessageCreate, MessageDelete, MessageDeleteBulk,
     };
     use twilight_model::guild::UnavailableGuild;
 
@@ -627,9 +765,9 @@ mod tests {
 
     use super::*;
     use crate::commands::tests::{GUILD, interaction};
-    use crate::storage::{self, Storage};
+    use crate::storage::{self, Quotes, Settings, Storage};
 
-    /// Settings that can be neither read nor saved, e.g. on a full disk.
+    /// Settings and quotes that can be neither read nor saved, e.g. on a full disk.
     struct Broken;
 
     /// The error of [`Broken`].
@@ -655,17 +793,52 @@ mod tests {
         }
     }
 
-    /// PuppyBot on the server [`GUILD`], with `settings`, and an API that fails every request,
+    impl Quotes for Broken {
+        fn save_quote(&self, _: Id<GuildMarker>, _: &Quote) -> Result<Saved, storage::Error> {
+            Err(disk_full())
+        }
+
+        fn quote(&self, _: Id<GuildMarker>, _: u32) -> Result<Option<Quote>, storage::Error> {
+            Err(disk_full())
+        }
+
+        fn random_quote(
+            &self,
+            _: Id<GuildMarker>,
+            _: &mut dyn FnMut(u32) -> Option<u32>,
+        ) -> Result<Option<(u32, Quote)>, storage::Error> {
+            Err(disk_full())
+        }
+
+        fn delete_quote(
+            &self,
+            _: Id<GuildMarker>,
+            _: u32,
+            _: Option<u64>,
+        ) -> Result<Deleted, storage::Error> {
+            Err(disk_full())
+        }
+
+        fn forget_message(
+            &self,
+            _: Id<GuildMarker>,
+            _: Id<MessageMarker>,
+        ) -> Result<Option<u32>, storage::Error> {
+            Err(disk_full())
+        }
+    }
+
+    /// PuppyBot on the server [`GUILD`], with `store`, and an API that fails every request,
     /// as nothing listens on its port. The client starts its rate limiter in the runtime, as
     /// `Discord::new` does, so this must run in one.
-    fn bot(settings: Box<dyn Settings>) -> Bot {
+    fn bot(store: Box<dyn Store>) -> Bot {
         Bot {
             http: Client::builder()
                 .token("token".to_owned())
                 .proxy("127.0.0.1:1".to_owned(), true)
                 .build(),
             guilds: BTreeSet::from([Id::new(GUILD)]),
-            settings,
+            store,
             mentions: OnceCell::new(),
             // Every die at its most.
             die: Some,
@@ -1034,6 +1207,142 @@ mod tests {
         });
     }
 
+    /// The quote of the message `message` with `text`, by the person 5, in the channel 4.
+    fn quote_of(message: u64, text: &str) -> Quote {
+        Quote {
+            author: 5,
+            name: "Puppy".to_owned(),
+            channel: 4,
+            message,
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn saving_showing_and_deleting_quotes() {
+        in_runtime(async {
+            let bot = bot(Box::new(Storage::in_memory()));
+            let guild = Id::new(GUILD);
+            let message = 1_300_000_000_000_000_010;
+            let only_asker = |text: QuoteText<'_>| (text.render(Lang::En), Audience::Asker);
+            let save = |quote| Request::SaveQuote(guild, quote);
+            let delete = |asker, may_manage| Request::DeleteQuote {
+                guild,
+                number: 1,
+                asker,
+                may_manage,
+            };
+            let asked = [
+                (
+                    save(quote_of(message, " Wuff! ")),
+                    QuoteText::Saved { number: 1 },
+                ),
+                (
+                    save(quote_of(message, "Wuff!")),
+                    QuoteText::AlreadySaved { number: 1 },
+                ),
+                (save(quote_of(2, "")), QuoteText::Empty),
+                (save(quote_of(3, &"a".repeat(501))), QuoteText::TooLong),
+                (
+                    Request::ShowQuote(guild, Some(2)),
+                    QuoteText::NoSuchQuote { number: 2 },
+                ),
+            ];
+            for (request, answer) in asked {
+                let said = said(bot.execute(request.clone(), Lang::En, None).await);
+                assert_eq!(said, only_asker(answer), "{request:?}");
+            }
+
+            // For everyone, without the spaces around it.
+            let link = format!("https://discord.com/channels/{GUILD}/4/{message}");
+            let shown = QuoteText::Shown {
+                number: 1,
+                author: "Puppy",
+                said: commands::created(message),
+                text: "Wuff!",
+                link: &link,
+            };
+            let everyone = (shown.render(Lang::En), Audience::Everyone);
+            for number in [Some(1), None] {
+                let said = said(
+                    bot.execute(Request::ShowQuote(guild, number), Lang::En, None)
+                        .await,
+                );
+                assert_eq!(said, everyone, "{number:?}");
+            }
+
+            // By the person quoted, or by someone who may manage messages.
+            let asked = [
+                (delete(6, false), QuoteText::NotYours { number: 1 }),
+                (delete(6, true), QuoteText::Deleted { number: 1 }),
+                (delete(5, false), QuoteText::NoSuchQuote { number: 1 }),
+                (Request::ShowQuote(guild, None), QuoteText::NoQuotes),
+                (
+                    save(quote_of(message, "Wuff!")),
+                    QuoteText::Saved { number: 2 },
+                ),
+                (save(quote_of(3, "Wau!")), QuoteText::Saved { number: 3 }),
+            ];
+            for (request, answer) in asked {
+                let said = said(bot.execute(request.clone(), Lang::En, None).await);
+                assert_eq!(said, only_asker(answer), "{request:?}");
+            }
+            let mine = Request::DeleteQuote {
+                guild,
+                number: 3,
+                asker: 5,
+                may_manage: false,
+            };
+            let said = said(bot.execute(mine, Lang::En, None).await);
+            assert_eq!(said, only_asker(QuoteText::Deleted { number: 3 }));
+
+            // Gone with their messages, on PuppyBot's servers.
+            let gone = [Id::new(1), Id::new(message)];
+            bot.forget(Some(Id::new(GUILD + 1)), &gone);
+            bot.forget(None, &gone);
+            assert!(bot.store.quote(guild, 2).unwrap().is_some());
+            bot.forget(Some(guild), &gone);
+            assert_eq!(bot.store.quote(guild, 2).unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn quotes_that_fail() {
+        in_runtime(async {
+            let bot = bot(Box::new(Broken));
+            let guild = Id::new(GUILD);
+            for request in [
+                Request::SaveQuote(guild, quote_of(1, "Wuff!")),
+                Request::ShowQuote(guild, Some(1)),
+                Request::ShowQuote(guild, None),
+                Request::DeleteQuote {
+                    guild,
+                    number: 1,
+                    asker: 5,
+                    may_manage: false,
+                },
+            ] {
+                assert_eq!(
+                    said(bot.execute(request.clone(), Lang::De, None).await),
+                    (Text::StorageFailed.render(Lang::De), Audience::Asker),
+                    "{request:?}"
+                );
+            }
+            // A warning in the log.
+            bot.forget(Some(guild), &[Id::new(1)]);
+        });
+    }
+
+    #[test]
+    fn answers_to_saving_quotes() {
+        assert_eq!(saved_text(Saved::New(3)), QuoteText::Saved { number: 3 });
+        assert_eq!(
+            saved_text(Saved::Already(3)),
+            QuoteText::AlreadySaved { number: 3 }
+        );
+        assert_eq!(saved_text(Saved::Full), QuoteText::Full);
+    }
+
     #[test]
     fn errors_say_why() {
         assert_eq!(
@@ -1079,6 +1388,18 @@ mod tests {
                 message: message("<@3> info"),
             };
             bot.handle(Event::MessageCreate(Box::new(message))).await;
+            let gone = MessageDelete {
+                channel_id: Id::new(4),
+                guild_id: Some(Id::new(GUILD)),
+                id: Id::new(10),
+            };
+            bot.handle(Event::MessageDelete(gone)).await;
+            let gone = MessageDeleteBulk {
+                channel_id: Id::new(4),
+                guild_id: Some(Id::new(GUILD)),
+                ids: vec![Id::new(10), Id::new(11)],
+            };
+            bot.handle(Event::MessageDeleteBulk(gone)).await;
             // Not wanted, see EVENTS.
             bot.handle(Event::Resumed).await;
         });

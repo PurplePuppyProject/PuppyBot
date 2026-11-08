@@ -12,6 +12,7 @@ use puppybot_core::dice::{self, Dice};
 use puppybot_core::games::{Coin, EIGHT_BALL, GameText, Hint};
 use puppybot_core::i18n::Lang;
 use puppybot_core::poll::{self, Poll};
+use puppybot_core::quotes::{self, MAX_QUOTE, QuoteText};
 use puppybot_core::text::Text;
 use puppybot_core::text_command;
 use secrecy::ExposeSecret;
@@ -21,6 +22,7 @@ use twilight_model::id::Id;
 
 use crate::cli;
 use crate::commands::{Answer, Audience, Request};
+use crate::storage::Quote;
 
 /// The command line, as arguments separated by NUL bytes, which arguments can't hold.
 ///
@@ -124,6 +126,9 @@ pub fn interaction(data: &[u8]) {
             texts(lang, &[Text::PollPosted, Text::PollFailed], Audience::Asker)
         }
         Request::Roll { dice, secret } => rolls(lang, &dice, secret),
+        Request::SaveQuote(_, quote) => saving(lang, &quote),
+        Request::ShowQuote(_, number) => showing(lang, number),
+        Request::DeleteQuote { number, .. } => deleting(lang, number),
         Request::Coin => games(lang, &COINS),
         Request::EightBall(question) => games(
             lang,
@@ -191,6 +196,76 @@ fn rolls(lang: Lang, dice: &Dice, secret: bool) -> Vec<Answer> {
         roll: &roll,
     };
     texts(lang, &[rolled, Text::DiceFailed], audience)
+}
+
+/// What saving `quote` may answer, in `lang`, and the quote, as /quote would show it.
+fn saving(lang: Lang, quote: &Quote) -> Vec<Answer> {
+    let saved = [
+        QuoteText::Saved { number: u32::MAX },
+        QuoteText::AlreadySaved { number: u32::MAX },
+        QuoteText::Empty,
+        QuoteText::TooLong,
+        QuoteText::Full,
+    ];
+    let mut answers = quote_texts(lang, &saved, Audience::Asker);
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    if let Ok(text) = quotes::quote(&quote.text) {
+        answers.push(shown(lang, u32::MAX, &quote.name, text));
+    }
+    answers
+}
+
+/// What /quote show may answer to `number`, in `lang`: also the longest quotes.
+fn showing(lang: Lang, number: Option<u32>) -> Vec<Answer> {
+    let number = number.unwrap_or(u32::MAX);
+    let author = "*".repeat(1000);
+    let longest = [
+        "\n".repeat(MAX_QUOTE),
+        "*".repeat(MAX_QUOTE),
+        "*\n".repeat(MAX_QUOTE / 2),
+    ];
+    let mut answers: Vec<_> = longest
+        .iter()
+        .map(|text| shown(lang, number, &author, text))
+        .collect();
+    let missing = [QuoteText::NoQuotes, QuoteText::NoSuchQuote { number }];
+    answers.extend(quote_texts(lang, &missing, Audience::Asker));
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    answers
+}
+
+/// What /quote delete may answer to `number`, in `lang`.
+fn deleting(lang: Lang, number: u32) -> Vec<Answer> {
+    let deleted = [
+        QuoteText::Deleted { number },
+        QuoteText::NotYours { number },
+        QuoteText::NoSuchQuote { number },
+    ];
+    let mut answers = quote_texts(lang, &deleted, Audience::Asker);
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    answers
+}
+
+/// The answer that shows `text` as the quote `number` by `author`, in `lang`, with the longest
+/// link and date.
+fn shown(lang: Lang, number: u32, author: &str, text: &str) -> Answer {
+    let link = format!("https://discord.com/channels/{0}/{0}/{0}", u64::MAX);
+    let shown = QuoteText::Shown {
+        number,
+        author,
+        said: i64::MIN,
+        text,
+        link: &link,
+    };
+    Answer::new(shown.render(lang), Audience::Everyone)
+}
+
+/// An answer for `audience` with each of the quotes' `texts`, in `lang`.
+fn quote_texts(lang: Lang, texts: &[QuoteText<'_>], audience: Audience) -> Vec<Answer> {
+    texts
+        .iter()
+        .map(|text| Answer::new(text.render(lang), audience))
+        .collect()
 }
 
 /// An answer for `audience` with each of `texts`, in `lang`.

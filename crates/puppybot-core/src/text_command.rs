@@ -48,11 +48,13 @@ pub enum TextCommand {
     Rps,
     /// Guessing a number.
     Guess,
+    /// A quote, see [`crate::quotes`].
+    Quote,
 }
 
 impl TextCommand {
     /// All text commands.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Info,
         Self::Help,
         Self::Dice,
@@ -63,6 +65,7 @@ impl TextCommand {
         Self::EightBall,
         Self::Rps,
         Self::Guess,
+        Self::Quote,
     ];
 
     /// The names of the command: in English, and in German if it differs.
@@ -79,6 +82,7 @@ impl TextCommand {
             Self::EightBall => &["8ball", "8kugel"],
             Self::Rps => &["rps", "ssp"],
             Self::Guess => &["guess", "rate", "raten"],
+            Self::Quote => &["quote", "zitat"],
         }
     }
 

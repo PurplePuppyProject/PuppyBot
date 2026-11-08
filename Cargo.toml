@@ -40,6 +40,7 @@ twilight-gateway = { version = "0.18.0", default-features = false, features = ["
 twilight-http = { version = "0.18.0", default-features = false, features = ["rustls-native-roots"] }
 twilight-model = "0.18.0"
 twilight-util = { version = "0.18.0", features = ["builder"] }
+twilight-validate = "0.18.0"
 # The database: one file, in pure Rust and without dependencies.
 redb = "4.5.0"
 # Random numbers of the system, for dice and games: ring, which TLS uses already.

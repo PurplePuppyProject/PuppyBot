@@ -230,6 +230,33 @@ pub fn button(custom_id: &str, locale: &str) -> Send {
     in_channel("1200000000000000008", "button-token", 3, locale, 0, &data)
 }
 
+/// Save quote, in the menu of the message `id` with `content` in [`CHANNEL`] by the person
+/// Rex, as someone with `locale` uses it. PuppyBot answers it at [`COMMAND_ANSWER`].
+pub fn save_quote(id: u64, content: &str, locale: &str) -> Send {
+    let content = serde_json::to_string(content).unwrap();
+    let message = format!(
+        r#"{{"id": "{id}", "channel_id": "{CHANNEL}", "content": {content}, "type": 0,
+        "flags": 0, "author": {{"id": "1100000000000000009", "username": "rex",
+            "global_name": "Rex", "discriminator": "0", "avatar": null}},
+        "timestamp": "2026-11-08T12:00:00.000000+00:00", "edited_timestamp": null,
+        "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+        "attachments": [], "embeds": [], "components": [], "pinned": false}}"#
+    );
+    let data = format!(
+        r#"{{"id": "1200000000000000009", "name": "Save quote", "type": 3, "target_id": "{id}",
+        "resolved": {{"messages": {{"{id}": {message}}}}}}}"#
+    );
+    in_channel("1200000000000000006", "command-token", 2, locale, 0, &data)
+}
+
+/// The event `MESSAGE_DELETE` of the message `id` in [`CHANNEL`] on [`GUILD`].
+pub fn message_delete(id: u64) -> Send {
+    Send::Dispatch(
+        "MESSAGE_DELETE",
+        format!(r#"{{"id": "{id}", "channel_id": "{CHANNEL}", "guild_id": "{GUILD}"}}"#),
+    )
+}
+
 /// The event `INTERACTION_CREATE` of the interaction `id` with `token` and `data`, of the type
 /// `kind`, in [`CHANNEL`] on [`GUILD`], by the member `puppy` with `locale` and `permissions`.
 fn in_channel(id: &str, token: &str, kind: u8, locale: &str, permissions: u64, data: &str) -> Send {

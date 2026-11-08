@@ -85,6 +85,14 @@ Decided in `feature/games`, with the user: a coin, the magic 8-ball, rock, paper
 - **The magic 8-ball** has the 20 classic answers, in German and English.
 - **The texts** are an enum of their own, `GameText` in `puppybot-core`, as decided in `feature/polls`.
 
+Decided in `feature/quotes`, with the user: everyone saves, the person quoted deletes.
+
+- **Saving** is a command in the menu of messages, Apps → Save quote, for everyone on the server; the answer is only for them. PuppyBot keeps the text without the spaces around it, up to 500 characters, so that every quote fits into a message also with a backslash before each character; the author's name at that time; and the IDs of the author, the channel and the message. A message is a quote once, and a server has at most 10000.
+- **Showing,** with `/quote show` and `!quote`, is for everyone in the channel: by number, or at random with the system's randomness. Numbers aren't given twice, so a number always means the same quote. The text appears as it is (`text::literal`), as a block quote, with the name, the date of the message as a timestamp, and a link to it.
+- **Deleting** is for the person quoted, and for people with Manage Messages in the channel, as Discord sends with the command; the database checks the author in the same write. When a message is deleted, its quote goes, too: `MESSAGE_DELETE` and `MESSAGE_DELETE_BULK` come with the intent `GUILD_MESSAGES`, which PuppyBot has. A read checks first, so most deleted messages don't write to the disk.
+- **Three tables:** `quotes` by server and number, `quoted` by server and message, against saving one twice and to find the quote of a deleted message, and `quote_numbers`, the last number of each server. They belong to the version 1 of the data: opening an older database adds them.
+- **A test checks the commands as Discord would,** with twilight-validate, which twilight-http brings anyway: the fake Discord of the tests doesn't check them.
+
 ## Structure
 
 A Cargo workspace:
@@ -109,7 +117,7 @@ One branch and pull request each, in this order:
 2. `feature/discord_connection`, done: twilight's gateway with the intents needed, reconnecting, the servers of the configuration, the slash commands registered with German and English descriptions, and a first command, `/info`.
 3. `feature/storage`, done: redb for the settings of each server, with a version of the stored data for later changes. The first setting: the language of each server, `/settings language`, for people with "Manage Server", in German or English, for the texts that aren't addressed to one person.
 4. `feature/prefix_commands`, done: the platform-neutral parser of prefix commands in `puppybot-core`, with a fuzz target, and a prefix for each server.
-5. `feature/utility_commands`: dice (an expression parser with a fuzz target), polls, info commands, quotes and small games.
+5. The utility commands, done, each in a branch of its own: `feature/dice` (an expression parser with a fuzz target), `feature/polls`, `feature/info_commands`, `feature/games` and `feature/quotes`.
 6. `feature/onboarding`: welcome messages, self-roles, confirming the rules, events and reminders.
 7. `feature/feeds`: RSS and Atom, YouTube and GitHub, with the protection above; then `feature/twitch`.
 

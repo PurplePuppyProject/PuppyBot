@@ -7,6 +7,7 @@ use puppybot_core::dice::{self, Dice};
 use puppybot_core::games::{GameText, Guessing, Hand};
 use puppybot_core::i18n::Lang;
 use puppybot_core::poll::{self, Poll};
+use puppybot_core::quotes::QuoteText;
 use puppybot_core::text::Text;
 use puppybot_core::text_command;
 use twilight_model::application::command::{Command, CommandType};
@@ -27,6 +28,8 @@ use twilight_util::builder::command::{
     BooleanBuilder, CommandBuilder, IntegerBuilder, StringBuilder, SubCommandBuilder, UserBuilder,
 };
 use twilight_util::builder::interaction_response::ChannelMessageBuilder;
+
+use crate::storage::Quote;
 
 /// Discord's locale of the German texts. The English ones are the defaults.
 const GERMAN: &str = "de";
@@ -132,7 +135,52 @@ pub fn commands() -> Vec<Command> {
                     .max_value(i64::from(Guessing::MAX)),
             )
             .build(),
+        save_quote(),
+        quote(),
     ]
+}
+
+/// The name of the command in the menu of messages, under Apps, that saves one as a quote.
+pub const SAVE_QUOTE: &str = "Save quote";
+
+/// Save quote, in German Zitat speichern, in the menu of messages. Such commands have no
+/// description.
+fn save_quote() -> Command {
+    CommandBuilder::new(SAVE_QUOTE, "", CommandType::Message)
+        .name_localizations([(GERMAN, "Zitat speichern")])
+        .contexts([InteractionContextType::Guild])
+        .build()
+}
+
+/// /quote, in German /zitat: show, with the number of a quote or without, and delete, with it.
+fn quote() -> Command {
+    let number = |required| {
+        IntegerBuilder::new("number", QuoteText::NumberDescription.render(Lang::En))
+            .name_localizations([(GERMAN, "nummer")])
+            .description_localizations([(GERMAN, QuoteText::NumberDescription.render(Lang::De))])
+            .min_value(1)
+            .max_value(i64::from(u32::MAX))
+            .required(required)
+    };
+    let show = SubCommandBuilder::new("show", QuoteText::ShowDescription.render(Lang::En))
+        .name_localizations([(GERMAN, "zeigen")])
+        .description_localizations([(GERMAN, QuoteText::ShowDescription.render(Lang::De))])
+        .option(number(false));
+    let delete = SubCommandBuilder::new("delete", QuoteText::DeleteDescription.render(Lang::En))
+        .name_localizations([(GERMAN, "löschen")])
+        .description_localizations([(GERMAN, QuoteText::DeleteDescription.render(Lang::De))])
+        .option(number(true));
+    CommandBuilder::new(
+        "quote",
+        QuoteText::QuoteDescription.render(Lang::En),
+        CommandType::ChatInput,
+    )
+    .name_localizations([(GERMAN, "zitat")])
+    .description_localizations([(GERMAN, QuoteText::QuoteDescription.render(Lang::De))])
+    .contexts([InteractionContextType::Guild])
+    .option(show)
+    .option(delete)
+    .build()
 }
 
 /// The slash command of a game, `name`, in German `german`, with its `description`.
@@ -279,6 +327,21 @@ pub enum Request<'a> {
         /// The name of the person who guessed.
         player: &'a str,
     },
+    /// A message to save as a quote on the server: Save quote, in the menu of a message.
+    SaveQuote(Id<GuildMarker>, Quote),
+    /// The quote of the server with this number, or one at random: /quote show.
+    ShowQuote(Id<GuildMarker>, Option<u32>),
+    /// Deleting a quote of the server: /quote delete.
+    DeleteQuote {
+        /// The server.
+        guild: Id<GuildMarker>,
+        /// The number of the quote.
+        number: u32,
+        /// The ID of the person who asked.
+        asker: u64,
+        /// Whether they may manage messages, and so delete any quote.
+        may_manage: bool,
+    },
     /// A roll of `dice`, which only the asker sees if it is `secret`: /dice.
     Roll {
         /// What to roll.
@@ -366,7 +429,7 @@ fn slash<'a>(
         "info" => Request::Answer(Text::Info {
             version: crate::VERSION,
         }),
-        "settings" if may_change_settings(interaction) => settings(command, guild),
+        "settings" if may(interaction, MAY_CHANGE_SETTINGS) => settings(command, guild),
         "settings" => Request::Answer(Text::NotAllowed),
         "dice" => roll(command),
         "poll" => poll_request(command),
@@ -376,10 +439,12 @@ fn slash<'a>(
         "8ball" => Request::EightBall(string(command, "question").unwrap_or_default()),
         "rps" => Request::RpsChoose,
         "guess" => Request::Guess {
-            number: number(command, "number"),
-            max: number(command, "max"),
+            number: number(&command.options, "number"),
+            max: number(&command.options, "max"),
             player: name(interaction),
         },
+        SAVE_QUOTE => quote_to_save(command, guild),
+        "quote" => quote_request(interaction, command, guild),
         _ => Request::Answer(Text::UnknownCommand),
     }
 }
@@ -395,27 +460,74 @@ fn string<'a>(command: &'a CommandData, name: &str) -> Option<&'a str> {
         })
 }
 
-/// The whole number of the option `name` of `command`, none if it has none, or a negative one.
-fn number(command: &CommandData, name: &str) -> Option<u32> {
-    command
-        .options
-        .iter()
-        .find_map(|option| match option.value {
-            CommandOptionValue::Integer(value) if option.name == name => u32::try_from(value).ok(),
-            _ => None,
-        })
+/// The whole number of the option `name` among `options`, none if there is none, or a negative
+/// one.
+fn number(options: &[CommandDataOption], name: &str) -> Option<u32> {
+    options.iter().find_map(|option| match option.value {
+        CommandOptionValue::Integer(value) if option.name == name => u32::try_from(value).ok(),
+        _ => None,
+    })
 }
 
-/// Whether the person who sent `interaction` may manage its server, as Discord says, also
+/// Whether the person who sent `interaction` has `permission` there, as Discord says, also
 /// through the permission Administrator.
-fn may_change_settings(interaction: &Interaction) -> bool {
+fn may(interaction: &Interaction, permission: Permissions) -> bool {
     interaction
         .member
         .as_ref()
         .and_then(|member| member.permissions)
-        .is_some_and(|permissions| {
-            permissions.intersects(MAY_CHANGE_SETTINGS | Permissions::ADMINISTRATOR)
-        })
+        .is_some_and(|permissions| permissions.intersects(permission | Permissions::ADMINISTRATOR))
+}
+
+/// Save quote on `guild`: the message, which Discord sends with the command. One that isn't
+/// there counts as one without text.
+fn quote_to_save(command: &CommandData, guild: Id<GuildMarker>) -> Request<'static> {
+    let message = command
+        .target_id
+        .and_then(|target| command.resolved.as_ref()?.messages.get(&target.cast()));
+    let quote = message.map_or_else(Quote::default, |message| {
+        let author = &message.author;
+        Quote {
+            author: author.id.get(),
+            name: author
+                .global_name
+                .as_deref()
+                .unwrap_or(&author.name)
+                .to_owned(),
+            channel: message.channel_id.get(),
+            message: message.id.get(),
+            text: message.content.clone(),
+        }
+    });
+    Request::SaveQuote(guild, quote)
+}
+
+/// /quote on `guild`: show, with the number of a quote or without, and delete, with it. Any
+/// other shape is of another version of the command.
+fn quote_request(
+    interaction: &Interaction,
+    command: &CommandData,
+    guild: Id<GuildMarker>,
+) -> Request<'static> {
+    let [
+        CommandDataOption {
+            name,
+            value: CommandOptionValue::SubCommand(options),
+        },
+    ] = command.options.as_slice()
+    else {
+        return Request::Answer(Text::UnknownCommand);
+    };
+    match (name.as_str(), number(options, "number")) {
+        ("show", number) => Request::ShowQuote(guild, number),
+        ("delete", Some(number)) => Request::DeleteQuote {
+            guild,
+            number,
+            asker: interaction.author_id().map_or(0, Id::get),
+            may_manage: may(interaction, Permissions::MANAGE_MESSAGES),
+        },
+        _ => Request::Answer(Text::UnknownCommand),
+    }
 }
 
 /// /settings on `guild`: its subcommands language and prefix, with the option `to` or without.
@@ -1231,14 +1343,47 @@ pub(crate) mod tests {
             names,
             [
                 "info", "settings", "dice", "poll", "server", "user", "coin", "8ball", "rps",
-                "guess"
+                "guess", SAVE_QUOTE, "quote"
             ]
         );
         for command in &commands {
-            let german = &command.description_localizations.as_ref().unwrap()["de"];
-            assert_ne!(&command.description, german);
             assert_eq!(command.contexts, Some(vec![InteractionContextType::Guild]));
         }
+        let slash = commands
+            .iter()
+            .filter(|command| command.kind == CommandType::ChatInput);
+        for command in slash {
+            let german = &command.description_localizations.as_ref().unwrap()["de"];
+            assert_ne!(&command.description, german);
+        }
+        // In the menu of messages, without a description.
+        let save = &commands[10];
+        assert_eq!(
+            (save.kind, save.description.as_str()),
+            (CommandType::Message, "")
+        );
+        assert_eq!(
+            save.name_localizations.as_ref().unwrap()["de"],
+            "Zitat speichern"
+        );
+        // /quote show with a number or without, /quote delete with it.
+        let quote = &commands[11];
+        let subcommands: Vec<_> = quote
+            .options
+            .iter()
+            .map(|subcommand| {
+                let number = &subcommand.options.as_ref().unwrap()[0];
+                let german = &subcommand.name_localizations.as_ref().unwrap()["de"];
+                (subcommand.name.as_str(), german.as_str(), number.required)
+            })
+            .collect();
+        assert_eq!(
+            subcommands,
+            [
+                ("show", "zeigen", Some(false)),
+                ("delete", "löschen", Some(true))
+            ]
+        );
         let (info, settings) = (&commands[0], &commands[1]);
         assert_eq!(
             info.description,
@@ -1290,5 +1435,96 @@ pub(crate) mod tests {
         );
         // Any text, no choices.
         assert!(to.choices.as_ref().is_none_or(Vec::is_empty));
+    }
+
+    /// The message of the tests, as Discord sends it with Save quote.
+    const MESSAGE: &str = r#"{"messages": {"1300000000000000020": {"id": "1300000000000000020",
+        "channel_id": "1300000000000000004", "content": "Wuff!", "type": 0, "flags": 0,
+        "author": {"id": "1100000000000000009", "username": "rex", "global_name": "Rex",
+            "discriminator": "0", "avatar": null},
+        "timestamp": "2026-11-08T12:00:00.000000+00:00", "edited_timestamp": null,
+        "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+        "attachments": [], "embeds": [], "components": [], "pinned": false}}}"#;
+
+    /// Save quote, in the menu of the message 1300000000000000020, with what Discord sends of
+    /// the messages, as JSON.
+    fn saving(messages: &str) -> Interaction {
+        let mut interaction = resolved(SAVE_QUOTE, "[]", messages, "de", 0);
+        if let Some(InteractionData::ApplicationCommand(command)) = &mut interaction.data {
+            command.kind = CommandType::Message;
+            command.target_id = Some(Id::new(1_300_000_000_000_000_020));
+        }
+        interaction
+    }
+
+    #[test]
+    fn saving_quotes() {
+        let guild = Id::new(GUILD);
+        let quote = Quote {
+            author: 1_100_000_000_000_000_009,
+            name: "Rex".to_owned(),
+            channel: 1_300_000_000_000_000_004,
+            message: 1_300_000_000_000_000_020,
+            text: "Wuff!".to_owned(),
+        };
+        let interaction = saving(MESSAGE);
+        assert_eq!(asked(&interaction).0, Request::SaveQuote(guild, quote));
+        // A message that Discord didn't send counts as one without text.
+        let interaction = saving("null");
+        assert_eq!(
+            asked(&interaction).0,
+            Request::SaveQuote(guild, Quote::default())
+        );
+    }
+
+    #[test]
+    fn showing_and_deleting_quotes() {
+        let guild = Id::new(GUILD);
+        let subcommand = |name: &str, options: &str| {
+            format!(r#"[{{"name": "{name}", "type": 1, "options": {options}}}]"#)
+        };
+        let number = r#"[{"name": "number", "type": 4, "value": 3}]"#;
+        let interaction = command("quote", &subcommand("show", "[]"), "de", 0);
+        assert_eq!(asked(&interaction).0, Request::ShowQuote(guild, None));
+        let interaction = command("quote", &subcommand("show", number), "de", 0);
+        assert_eq!(asked(&interaction).0, Request::ShowQuote(guild, Some(3)));
+        // Whether the person who asked may delete the quotes of others.
+        let delete = subcommand("delete", number);
+        let manage_messages = Permissions::MANAGE_MESSAGES.bits();
+        for (permissions, may_manage) in [(0, false), (manage_messages, true)] {
+            let interaction = command("quote", &delete, "de", permissions);
+            assert_eq!(
+                asked(&interaction).0,
+                Request::DeleteQuote {
+                    guild,
+                    number: 3,
+                    asker: 1_400_000_000_000_000_005,
+                    may_manage
+                }
+            );
+        }
+        // Other shapes, of other versions of the command.
+        for options in [
+            "[]".to_owned(),
+            subcommand("delete", "[]"),
+            subcommand("edit", "[]"),
+        ] {
+            let interaction = command("quote", &options, "de", 0);
+            assert_eq!(
+                asked(&interaction).0,
+                Request::Answer(Text::UnknownCommand),
+                "{options}"
+            );
+        }
+    }
+
+    /// As Discord takes them, which the fake Discord of the tests doesn't check: names,
+    /// descriptions, their translations and the options within Discord's rules.
+    #[test]
+    fn discord_takes_the_commands() {
+        for command in commands() {
+            twilight_validate::command::command(&command).unwrap();
+            twilight_validate::command::options(&command.options).unwrap();
+        }
     }
 }

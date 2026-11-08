@@ -380,6 +380,7 @@ impl Text<'_> {
                  - `{prefix}umfrage Pizza? | Ja | Nein`: startet eine Umfrage für 24 Stunden\n\
                  - `{prefix}server`, `{prefix}nutzer`: seit wann es diesen Server gibt, und seit wann jemand hier ist\n\
                  - `{prefix}münze`, `{prefix}8kugel Frage?`, `{prefix}ssp`, `{prefix}rate 42`: Münze, magische 8-Kugel, Schere-Stein-Papier, Zahlenraten\n\
+                 - `{prefix}zitat 3`: ein Zitat, ohne Nummer ein zufälliges; neue speichert das Menü einer Nachricht, Apps → Zitat speichern\n\
                  - `{prefix}hilfe`: diese Befehle\n\
                  Seine Slash-Befehle, z. B. `/info`, stehen in Discords Liste der Befehle."
             ),
@@ -532,6 +533,7 @@ impl Text<'_> {
                  - `{prefix}poll Pizza? | Yes | No`: starts a poll for 24 hours\n\
                  - `{prefix}server`, `{prefix}user`: since when this server is there, and someone is here\n\
                  - `{prefix}coin`, `{prefix}8ball question?`, `{prefix}rps`, `{prefix}guess 42`: a coin, the magic 8-ball, rock paper scissors, guessing a number\n\
+                 - `{prefix}quote 3`: a quote, without a number one at random; the menu of a message saves new ones, Apps → Save quote\n\
                  - `{prefix}help`: these commands\n\
                  Its slash commands, e.g. `/info`, are in Discord's list of commands."
             ),
@@ -737,6 +739,7 @@ mod tests {
              - `?poll Pizza? | Yes | No`: starts a poll for 24 hours\n\
              - `?server`, `?user`: since when this server is there, and someone is here\n\
              - `?coin`, `?8ball question?`, `?rps`, `?guess 42`: a coin, the magic 8-ball, rock paper scissors, guessing a number\n\
+             - `?quote 3`: a quote, without a number one at random; the menu of a message saves new ones, Apps → Save quote\n\
              - `?help`: these commands\n\
              Its slash commands, e.g. `/info`, are in Discord's list of commands."
         );

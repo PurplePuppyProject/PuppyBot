@@ -13,9 +13,9 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use common::{
-    APPLICATION, BUTTON_ANSWER, CHANNEL_MESSAGES, COMMAND_ANSWER, FakeDiscord, GUILD, MANAGE_GUILD,
-    MENTION, OTHER_GUILD, Running, Send, TOKEN, button, config, guild_create, interaction, message,
-    ready, settings, setup, slash,
+    APPLICATION, BUTTON_ANSWER, CHANNEL, CHANNEL_MESSAGES, COMMAND_ANSWER, FakeDiscord, GUILD,
+    MANAGE_GUILD, MENTION, OTHER_GUILD, Running, Send, TOKEN, button, config, guild_create,
+    interaction, message, message_delete, ready, save_quote, settings, setup, slash,
 };
 
 /// Starts PuppyBot with `discord`.
@@ -728,4 +728,106 @@ fn games_as_text_commands() {
     let second = one.contains("1? The number is higher.")
         && two.contains("**puppy** got it: **2**, after 2 guesses!");
     assert!(first || second, "{one} {two}");
+}
+
+/// The options of /quote `subcommand`, with the number `number` if given, as JSON.
+fn quote(subcommand: &str, number: Option<u32>) -> String {
+    let number = number.map_or_else(String::new, |number| {
+        format!(r#"{{"name": "number", "type": 4, "value": {number}}}"#)
+    });
+    format!(r#"[{{"name": "{subcommand}", "type": 1, "options": [{number}]}}]"#)
+}
+
+/// The permission "Manage Messages", as Discord sends permissions: a number.
+const MANAGE_MESSAGES: u64 = 1 << 13;
+
+#[test]
+fn quotes_saved_shown_and_deleted() {
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                save_quote(20, "**Wuff!**", "de"),
+                save_quote(20, "**Wuff!**", "en-US"),
+                save_quote(21, "Wau!", "en-US"),
+                slash("quote", &quote("show", Some(1)), "en-US", 0),
+                // By someone else, who may delete it only if they may manage messages.
+                slash("quote", &quote("delete", Some(1)), "de", 0),
+                slash("quote", &quote("delete", Some(1)), "en-US", MANAGE_MESSAGES),
+                message(1, "!zitat 1", GUILD, false),
+                // With its message, the quote goes, too.
+                message_delete(21),
+                message(2, "!quote", GUILD, false),
+            ]
+        },
+        None,
+    );
+    let (_dir, mut bot) = start(&discord);
+    let commands = requests_to(&discord, COMMAND_ANSWER, 6);
+    let texts = requests_to(&discord, CHANNEL_MESSAGES, 2);
+    bot.wait_for("as its message is gone");
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert_eq!(
+        (commands.len(), texts.len()),
+        (6, 2),
+        "{commands:#?} {texts:#?}"
+    );
+    let registered = discord.wait_for_request(&format!(
+        "PUT /api/v10/applications/{APPLICATION}/guilds/{GUILD}/commands"
+    ));
+    assert!(
+        registered.body.contains(r#""name":"Save quote""#),
+        "{}",
+        registered.body
+    );
+
+    // Saving, only for the person who saves.
+    let saved = [
+        "PuppyBot hat die Nachricht als Zitat #1 gespeichert.",
+        "This message is quote #1 already.",
+        "PuppyBot saved the message as quote #2.",
+    ];
+    for (answer, text) in commands.iter().zip(saved) {
+        assert!(answer.body.contains(text), "{text}: {}", answer.body);
+        assert!(answer.body.contains(r#""flags":64"#), "{}", answer.body);
+    }
+    // The quote, for everyone, as it was written, with a link to the message.
+    let shown = &commands[3].body;
+    let link =
+        format!("[Quote #1](<https://discord.com/channels/{GUILD}/{CHANNEL}/20>) by **Rex**");
+    assert!(shown.contains(&link), "{shown}");
+    assert!(shown.contains(r#":\n> \\*\\*Wuff!\\*\\*""#), "{shown}");
+    assert!(!shown.contains(r#""flags":64"#), "{shown}");
+    assert!(
+        commands[4]
+            .body
+            .contains("Zitat #1 dürfen nur die zitierte Person und Leute löschen"),
+        "{}",
+        commands[4].body
+    );
+    assert!(
+        commands[5].body.contains("PuppyBot deleted quote #1."),
+        "{}",
+        commands[5].body
+    );
+
+    // As text commands.
+    assert!(
+        texts[0].body.contains("This server has no quote #1."),
+        "{}",
+        texts[0].body
+    );
+    assert!(
+        texts[1].body.contains("This server has no quotes yet."),
+        "{}",
+        texts[1].body
+    );
+    for part in [
+        "saved a quote",
+        "deleted a quote",
+        "deleted a quote, as its message is gone",
+    ] {
+        assert!(log.contains(part), "{part}: {log}");
+    }
 }
