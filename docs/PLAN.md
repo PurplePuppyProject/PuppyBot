@@ -77,6 +77,14 @@ Decided in `feature/info_commands`:
 - **Dates are Discord's timestamps,** `<t:…:D>` and `<t:…:R>`, which Discord shows in the language and time zone of each reader.
 - **What others wrote, e.g. names, appears as it is:** the texts in `puppybot-core` clip it and put a backslash before each character that Discord reads as Markdown, a link, an emoji or a mention, so that a name like `[Nitro](https://…)` can't hide a link in PuppyBot's message. Line breaks become spaces, and the marks that turn the direction of the writing are left out.
 
+Decided in `feature/games`, with the user: a coin, the magic 8-ball, rock, paper, scissors, and guessing a number.
+
+- **The games answer in the channel,** for everyone there, as the dice do, in the language of the person who played.
+- **Rock, paper, scissors has buttons,** with the IDs `rps:rock`, `rps:paper` and `rps:scissors`. PuppyBot chooses its hand when someone clicks, and answers the click by changing the message: the outcome takes the place of the buttons, so a message is one game, and PuppyBot keeps nothing. A click on another button gets no answer.
+- **Guessing a number** has one game per channel, in memory only: a restart ends the games, which is fine for a game and keeps them out of the database. A game goes up to 2 to 1000000, by default 100; guesses outside it don't count as tries.
+- **The magic 8-ball** has the 20 classic answers, in German and English.
+- **The texts** are an enum of their own, `GameText` in `puppybot-core`, as decided in `feature/polls`.
+
 ## Structure
 
 A Cargo workspace:

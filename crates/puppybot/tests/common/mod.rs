@@ -210,19 +210,41 @@ pub fn guild_create(guild: u64) -> Send {
 /// The slash command `name` with `options`, as JSON, on [`GUILD`], by someone with the locale
 /// `locale` and the permissions `permissions`. PuppyBot answers it at [`COMMAND_ANSWER`].
 pub fn slash(name: &str, options: &str, locale: &str, permissions: u64) -> Send {
+    let data = format!(
+        r#"{{"id": "1200000000000000007", "name": "{name}", "type": 1, "options": {options}}}"#
+    );
+    in_channel(
+        "1200000000000000006",
+        "command-token",
+        2,
+        locale,
+        permissions,
+        &data,
+    )
+}
+
+/// A click on the button `custom_id` of a message in [`CHANNEL`] on [`GUILD`], by someone with
+/// the locale `locale`. PuppyBot answers it at [`BUTTON_ANSWER`].
+pub fn button(custom_id: &str, locale: &str) -> Send {
+    let data = format!(r#"{{"custom_id": "{custom_id}", "component_type": 2}}"#);
+    in_channel("1200000000000000008", "button-token", 3, locale, 0, &data)
+}
+
+/// The event `INTERACTION_CREATE` of the interaction `id` with `token` and `data`, of the type
+/// `kind`, in [`CHANNEL`] on [`GUILD`], by the member `puppy` with `locale` and `permissions`.
+fn in_channel(id: &str, token: &str, kind: u8, locale: &str, permissions: u64, data: &str) -> Send {
     Send::Dispatch(
         "INTERACTION_CREATE",
         format!(
-            r#"{{"id": "1200000000000000006", "application_id": "{APPLICATION}", "type": 2,
-            "token": "command-token", "version": 1, "locale": "{locale}",
+            r#"{{"id": "{id}", "application_id": "{APPLICATION}", "type": {kind},
+            "token": "{token}", "version": 1, "locale": "{locale}",
             "guild_id": "{GUILD}", "attachment_size_limit": 26214400,
             "channel": {{"id": "{CHANNEL}", "type": 0, "guild_id": "{GUILD}"}},
             "authorizing_integration_owners": {{}}, "entitlements": [],
             "member": {{"deaf": false, "mute": false, "flags": 0, "roles": [], "joined_at": null,
                 "permissions": "{permissions}", "user": {{"id": "1400000000000000005",
                 "username": "puppy", "discriminator": "0", "avatar": null}}}},
-            "data": {{"id": "1200000000000000007", "name": "{name}", "type": 1,
-                "options": {options}}}}}"#
+            "data": {data}}}"#
         ),
     )
 }
@@ -239,6 +261,10 @@ pub fn settings(subcommand: &str, to: Option<&str>, locale: &str, permissions: u
 /// Where PuppyBot answers [`slash`].
 pub const COMMAND_ANSWER: &str =
     "POST /api/v10/interactions/1200000000000000006/command-token/callback";
+
+/// Where PuppyBot answers [`button`].
+pub const BUTTON_ANSWER: &str =
+    "POST /api/v10/interactions/1200000000000000008/button-token/callback";
 
 /// The channel of the messages of the tests, see [`message`].
 pub const CHANNEL: u64 = 1_300_000_000_000_000_004;

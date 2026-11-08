@@ -9,6 +9,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 
 use puppybot_core::dice::{self, Dice};
+use puppybot_core::games::{Coin, EIGHT_BALL, GameText, Hint};
 use puppybot_core::i18n::Lang;
 use puppybot_core::poll::{self, Poll};
 use puppybot_core::text::Text;
@@ -19,7 +20,7 @@ use twilight_model::channel::message::{AllowedMentions, MessageFlags};
 use twilight_model::id::Id;
 
 use crate::cli;
-use crate::commands::{Audience, Request};
+use crate::commands::{Answer, Audience, Request};
 
 /// The command line, as arguments separated by NUL bytes, which arguments can't hold.
 ///
@@ -73,8 +74,9 @@ pub fn config(data: &[u8]) {
 /// An interaction, as JSON from Discord's gateway.
 ///
 /// Checks beyond not crashing: each answer that what [`crate::commands::request`] reads may
-/// get, with what the database may hold, is a message that only the person who asked sees,
-/// mentions nobody, and fits into Discord's limit of 2000 characters.
+/// get, with what the database may hold, is ephemeral exactly when it is only for the person who
+/// asked, mentions nobody, not even in its text, and fits into Discord's limit of 2000
+/// characters.
 ///
 /// # Panics
 ///
@@ -88,82 +90,162 @@ pub fn interaction(data: &[u8]) {
         return;
     };
     let lang = asked.lang;
-    let only_asker = |texts: &[Text<'_>]| {
-        texts
-            .iter()
-            .map(|text| (text.render(lang), Audience::Asker))
-            .collect::<Vec<_>>()
-    };
     let answers = match asked.request {
-        Request::Answer(text) => only_asker(&[text]),
-        Request::ShowLanguage(_) => only_asker(&[
-            Text::LanguageIs { chosen: None },
-            Text::LanguageIs {
-                chosen: Some(Lang::De),
-            },
-            Text::StorageFailed,
-        ]),
-        Request::SetLanguage(_, new) => {
-            only_asker(&[Text::LanguageSet { lang: new }, Text::StorageFailed])
-        }
-        Request::ShowPrefix(_) => only_asker(&[
-            Text::PrefixIs { chosen: None },
-            Text::PrefixIs {
-                chosen: Some("pb!"),
-            },
-            Text::StorageFailed,
-        ]),
+        Request::Answer(text) => texts(lang, &[text], Audience::Asker),
+        Request::ShowLanguage(_) => texts(lang, &LANGUAGES, Audience::Asker),
+        Request::SetLanguage(_, new) => texts(
+            lang,
+            &[Text::LanguageSet { lang: new }, Text::StorageFailed],
+            Audience::Asker,
+        ),
+        Request::ShowPrefix(_) => texts(lang, &PREFIXES, Audience::Asker),
         Request::SetPrefix(_, prefix) => {
             assert!(text_command::is_valid_prefix(prefix), "{prefix:?}");
-            only_asker(&[Text::PrefixSet { prefix }, Text::StorageFailed])
+            texts(
+                lang,
+                &[Text::PrefixSet { prefix }, Text::StorageFailed],
+                Audience::Asker,
+            )
         }
-        Request::ServerInfo(_) => only_asker(&[
-            Text::ServerInfo {
-                name: &"x".repeat(100),
-                created: i64::MAX,
-                members: Some(u64::MAX),
-            },
-            Text::InfoFailed,
-        ]),
+        Request::ServerInfo(_) => texts(
+            lang,
+            &[
+                Text::ServerInfo {
+                    name: &"x".repeat(1000),
+                    created: i64::MAX,
+                    members: Some(u64::MAX),
+                },
+                Text::InfoFailed,
+            ],
+            Audience::Asker,
+        ),
         Request::Poll(poll) => {
             check_poll(&poll);
-            only_asker(&[Text::PollPosted, Text::PollFailed])
+            texts(lang, &[Text::PollPosted, Text::PollFailed], Audience::Asker)
         }
-        Request::Roll { dice, secret } => {
-            let audience = if secret {
-                Audience::Asker
-            } else {
-                Audience::Everyone
-            };
-            // Every die at its most, which writes the longest numbers.
-            let roll = dice
-                .roll(&mut |sides| Some(sides))
-                .map(|roll| roll.to_string())
-                .unwrap_or_default();
-            assert!(!roll.is_empty(), "no roll of {dice}");
-            let rolled = Text::Rolled {
-                dice: &dice.to_string(),
-                roll: &roll,
-            };
-            vec![
-                (rolled.render(lang), audience),
-                (Text::DiceFailed.render(lang), audience),
-            ]
-        }
+        Request::Roll { dice, secret } => rolls(lang, &dice, secret),
+        Request::Coin => games(lang, &COINS),
+        Request::EightBall(question) => games(
+            lang,
+            &[
+                GameText::EightBall {
+                    question,
+                    answer: EIGHT_BALL - 1,
+                },
+                GameText::GameFailed,
+            ],
+        ),
+        Request::RpsChoose => vec![Answer {
+            buttons: crate::commands::rps_buttons(lang),
+            ..Answer::new(GameText::RpsChoose.render(lang), Audience::Everyone)
+        }],
+        Request::RpsPlay { hand, player } => games(
+            lang,
+            &[
+                GameText::RpsPlayed {
+                    player,
+                    hand,
+                    bot: hand,
+                },
+                GameText::GameFailed,
+            ],
+        ),
+        Request::Guess {
+            number,
+            max,
+            player,
+        } => games(
+            lang,
+            &[
+                GameText::Guessed {
+                    player,
+                    number: number.unwrap_or(u32::MAX),
+                    hint: Hint::Right { tries: u32::MAX },
+                    max: max.unwrap_or(u32::MAX),
+                },
+                GameText::GuessStarted {
+                    max: max.unwrap_or(u32::MAX),
+                },
+                GameText::GameFailed,
+            ],
+        ),
     };
-    for (content, audience) in answers {
-        // An answer without a message has none of these.
-        let data = crate::commands::response(content, audience)
-            .data
-            .unwrap_or_default();
-        let ephemeral = (audience == Audience::Asker).then_some(MessageFlags::EPHEMERAL);
-        assert_eq!(data.flags, ephemeral, "{data:?}");
-        assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
-        assert!(
-            data.content
-                .is_some_and(|content| content.chars().count() <= 2000)
-        );
-    }
+    answers.into_iter().for_each(check);
+}
+
+/// What `/dice` may answer to `dice`, in `lang`, for everyone or, if `secret`, for the person who
+/// asked: a roll, of every die at its most, which writes the longest numbers, or a failure.
+fn rolls(lang: Lang, dice: &Dice, secret: bool) -> Vec<Answer> {
+    let audience = if secret {
+        Audience::Asker
+    } else {
+        Audience::Everyone
+    };
+    let roll = dice
+        .roll(&mut |sides| Some(sides))
+        .map(|roll| roll.to_string())
+        .unwrap_or_default();
+    assert!(!roll.is_empty(), "no roll of {dice}");
+    let rolled = Text::Rolled {
+        dice: &dice.to_string(),
+        roll: &roll,
+    };
+    texts(lang, &[rolled, Text::DiceFailed], audience)
+}
+
+/// An answer for `audience` with each of `texts`, in `lang`.
+fn texts(lang: Lang, texts: &[Text<'_>], audience: Audience) -> Vec<Answer> {
+    texts
+        .iter()
+        .map(|text| Answer::new(text.render(lang), audience))
+        .collect()
+}
+
+/// An answer for everyone with each of the games' `texts`, in `lang`.
+fn games(lang: Lang, texts: &[GameText<'_>]) -> Vec<Answer> {
+    texts
+        .iter()
+        .map(|text| Answer::new(text.render(lang), Audience::Everyone))
+        .collect()
+}
+
+/// What `/settings language` may answer, with what the database may hold.
+const LANGUAGES: [Text<'static>; 3] = [
+    Text::LanguageIs { chosen: None },
+    Text::LanguageIs {
+        chosen: Some(Lang::De),
+    },
+    Text::StorageFailed,
+];
+
+/// What `/settings prefix` may answer, with what the database may hold.
+const PREFIXES: [Text<'static>; 3] = [
+    Text::PrefixIs { chosen: None },
+    Text::PrefixIs {
+        chosen: Some("pb!"),
+    },
+    Text::StorageFailed,
+];
+
+/// What `/coin` may answer.
+const COINS: [GameText<'static>; 3] = [
+    GameText::Coin(Coin::Heads),
+    GameText::Coin(Coin::Tails),
+    GameText::GameFailed,
+];
+
+/// The checks of [`interaction`] of `answer`.
+fn check(answer: Answer) {
+    let audience = answer.audience;
+    // An answer without a message has none of these.
+    let data = crate::commands::response(answer).data.unwrap_or_default();
+    let ephemeral = (audience == Audience::Asker).then_some(MessageFlags::EPHEMERAL);
+    assert_eq!(data.flags, ephemeral, "{data:?}");
+    assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
+    let content = data.content.unwrap_or_default();
+    assert!((1..=2000).contains(&content.chars().count()), "{content}");
+    // Not even in the text: what others wrote, e.g. a name, appears as it is.
+    assert!(!content.contains("<@"), "{content}");
 }
 
 /// A poll as a text command writes it: the question and the answers, separated by `|`.
@@ -303,7 +385,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use twilight_model::application::interaction::{Interaction, InteractionType};
+    use twilight_model::application::interaction::{Interaction, InteractionData, InteractionType};
     use twilight_model::id::Id;
 
     #[test]
@@ -376,9 +458,16 @@ mod tests {
             println!("{}", path.display());
             let seed = fs::read(&path).unwrap();
             let interaction: Interaction = serde_json::from_slice(&seed).unwrap();
+            // Slash commands get an answer, and the buttons of rock, paper, scissors.
+            let answered = match &interaction.data {
+                Some(InteractionData::MessageComponent(data)) => {
+                    data.custom_id.starts_with(crate::commands::RPS)
+                }
+                _ => interaction.kind == InteractionType::ApplicationCommand,
+            };
             assert_eq!(
                 crate::commands::request(&interaction, &guilds).is_some(),
-                interaction.kind == InteractionType::ApplicationCommand
+                answered
             );
             super::interaction(&seed);
             seeds += 1;

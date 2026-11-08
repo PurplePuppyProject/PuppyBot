@@ -379,6 +379,7 @@ impl Text<'_> {
                  - `{prefix}würfel 2W6+3`: würfelt, z. B. auch `W20` oder `4W6kh3`\n\
                  - `{prefix}umfrage Pizza? | Ja | Nein`: startet eine Umfrage für 24 Stunden\n\
                  - `{prefix}server`, `{prefix}nutzer`: seit wann es diesen Server gibt, und seit wann jemand hier ist\n\
+                 - `{prefix}münze`, `{prefix}8kugel Frage?`, `{prefix}ssp`, `{prefix}rate 42`: Münze, magische 8-Kugel, Schere-Stein-Papier, Zahlenraten\n\
                  - `{prefix}hilfe`: diese Befehle\n\
                  Seine Slash-Befehle, z. B. `/info`, stehen in Discords Liste der Befehle."
             ),
@@ -530,6 +531,7 @@ impl Text<'_> {
                  - `{prefix}dice 2d6+3`: rolls dice, e.g. also `d20` or `4d6kh3`\n\
                  - `{prefix}poll Pizza? | Yes | No`: starts a poll for 24 hours\n\
                  - `{prefix}server`, `{prefix}user`: since when this server is there, and someone is here\n\
+                 - `{prefix}coin`, `{prefix}8ball question?`, `{prefix}rps`, `{prefix}guess 42`: a coin, the magic 8-ball, rock paper scissors, guessing a number\n\
                  - `{prefix}help`: these commands\n\
                  Its slash commands, e.g. `/info`, are in Discord's list of commands."
             ),
@@ -734,6 +736,7 @@ mod tests {
              - `?dice 2d6+3`: rolls dice, e.g. also `d20` or `4d6kh3`\n\
              - `?poll Pizza? | Yes | No`: starts a poll for 24 hours\n\
              - `?server`, `?user`: since when this server is there, and someone is here\n\
+             - `?coin`, `?8ball question?`, `?rps`, `?guess 42`: a coin, the magic 8-ball, rock paper scissors, guessing a number\n\
              - `?help`: these commands\n\
              Its slash commands, e.g. `/info`, are in Discord's list of commands."
         );

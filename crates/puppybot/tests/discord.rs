@@ -13,9 +13,9 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use common::{
-    APPLICATION, CHANNEL_MESSAGES, COMMAND_ANSWER, FakeDiscord, GUILD, MANAGE_GUILD, MENTION,
-    OTHER_GUILD, Running, Send, TOKEN, config, guild_create, interaction, message, ready, settings,
-    setup, slash,
+    APPLICATION, BUTTON_ANSWER, CHANNEL_MESSAGES, COMMAND_ANSWER, FakeDiscord, GUILD, MANAGE_GUILD,
+    MENTION, OTHER_GUILD, Running, Send, TOKEN, button, config, guild_create, interaction, message,
+    ready, settings, setup, slash,
 };
 
 /// Starts PuppyBot with `discord`.
@@ -33,7 +33,7 @@ fn registers_the_commands_leaves_other_servers_and_answers() {
                 ready(url),
                 guild_create(GUILD),
                 guild_create(OTHER_GUILD),
-                // A button, which isn't a slash command: no answer.
+                // A button that isn't PuppyBot's: no answer.
                 interaction(3, "", "de", GUILD),
                 interaction(2, "info", "de", GUILD),
             ]
@@ -567,4 +567,165 @@ fn the_server_and_people() {
         "{}",
         texts[0].body
     );
+}
+
+/// A game of guessing from 1 to 2, as the options of /guess.
+const GUESS_TO_2: &str = r#"[{"name": "max", "type": 4, "value": 2}]"#;
+
+#[test]
+fn games_for_everyone_in_the_channel() {
+    let question = r#"[{"name": "question", "type": 3, "value": "Scheint *morgen* die Sonne?"}]"#;
+    let discord = FakeDiscord::start(
+        move |url| {
+            vec![
+                ready(url),
+                slash("coin", "[]", "en-US", 0),
+                slash("8ball", question, "de", 0),
+                slash("rps", "[]", "de", 0),
+                button("rps:scissors", "en-US"),
+                // Not a hand: no answer.
+                button("rps:lizard", "en-US"),
+                slash("guess", GUESS_TO_2, "en-US", 0),
+            ]
+        },
+        None,
+    );
+    let (_dir, bot) = start(&discord);
+    let commands = requests_to(&discord, COMMAND_ANSWER, 4);
+    let clicks = requests_to(&discord, BUTTON_ANSWER, 1);
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert_eq!(
+        (commands.len(), clicks.len()),
+        (4, 1),
+        "{commands:#?} {clicks:#?}"
+    );
+
+    // For everyone in the channel, as messages that mention nobody.
+    for answer in &commands {
+        assert!(answer.body.contains(r#""type":4"#), "{}", answer.body);
+        assert!(!answer.body.contains(r#""flags":64"#), "{}", answer.body);
+        assert!(
+            answer.body.contains(r#""allowed_mentions":{"parse":[]}"#),
+            "{}",
+            answer.body
+        );
+    }
+    assert!(
+        commands[0].body.contains("The coin shows **"),
+        "{}",
+        commands[0].body
+    );
+    // The question as it is, not in Markdown.
+    assert!(
+        commands[1]
+            .body
+            .contains(r#""content":"🎱 *Scheint \\*morgen\\* die Sonne?* **"#),
+        "{}",
+        commands[1].body
+    );
+    // Rock, paper, scissors: the buttons, and the game in their place after a click.
+    let rps = &commands[2].body;
+    assert!(rps.contains("Schere, Stein oder Papier?"), "{rps}");
+    for part in [
+        r#""custom_id":"rps:rock""#,
+        r#""label":"Stein""#,
+        r#""custom_id":"rps:scissors""#,
+    ] {
+        assert!(rps.contains(part), "{part}: {rps}");
+    }
+    let click = &clicks[0].body;
+    assert!(click.contains(r#""type":7"#), "{click}");
+    assert!(
+        click.contains("**puppy** chose scissors, PuppyBot "),
+        "{click}"
+    );
+    assert!(click.contains(r#""components":[]"#), "{click}");
+    assert!(!click.contains(r#""flags":64"#), "{click}");
+    assert!(
+        commands[3]
+            .body
+            .contains("PuppyBot thinks of a number from 1 to 2."),
+        "{}",
+        commands[3].body
+    );
+}
+
+#[test]
+fn games_as_text_commands() {
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                message(1, "!münze", GUILD, false),
+                message(2, "!8kugel", GUILD, false),
+                message(3, "!ssp", GUILD, false),
+                // A game of /guess, which runs in the channel.
+                slash("guess", GUESS_TO_2, "en-US", 0),
+                message(4, "!rate", GUILD, false),
+                message(5, "!rate 3", GUILD, false),
+                message(6, "!rate 1", GUILD, false),
+                message(7, "!rate 2", GUILD, false),
+            ]
+        },
+        None,
+    );
+    let (_dir, bot) = start(&discord);
+    let texts = requests_to(&discord, CHANNEL_MESSAGES, 7);
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert_eq!(texts.len(), 7, "{texts:#?}");
+
+    // In the language of the server, as replies that mention nobody.
+    for (text, id) in texts.iter().zip(1..) {
+        assert!(
+            text.body.contains(&format!(r#""message_id":"{id}""#)),
+            "{}",
+            text.body
+        );
+        assert!(
+            text.body.contains(r#""allowed_mentions":{"parse":[]}"#),
+            "{}",
+            text.body
+        );
+    }
+    assert!(
+        texts[0].body.contains("The coin shows **"),
+        "{}",
+        texts[0].body
+    );
+    assert!(
+        texts[1].body.contains(r#""content":"🎱 **"#),
+        "{}",
+        texts[1].body
+    );
+    assert!(
+        texts[2].body.contains("Rock, paper or scissors?"),
+        "{}",
+        texts[2].body
+    );
+    assert!(
+        texts[2].body.contains(r#""label":"Rock""#),
+        "{}",
+        texts[2].body
+    );
+    assert!(
+        texts[3]
+            .body
+            .contains("A game runs here: the number is from 1 to 2."),
+        "{}",
+        texts[3].body
+    );
+    assert!(
+        texts[4].body.contains("The number is between 1 and 2."),
+        "{}",
+        texts[4].body
+    );
+    // 1 is right, and 2 starts a new game; or 1 is too low, and 2 is right.
+    let (one, two) = (&texts[5].body, &texts[6].body);
+    let first = one.contains("**puppy** got it: **1**, on the first guess!")
+        && two.contains("PuppyBot thinks of a number from 1 to 100.");
+    let second = one.contains("1? The number is higher.")
+        && two.contains("**puppy** got it: **2**, after 2 guesses!");
+    assert!(first || second, "{one} {two}");
 }

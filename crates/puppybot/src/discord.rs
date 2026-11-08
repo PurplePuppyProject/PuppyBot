@@ -1,13 +1,14 @@
 //! The connection to Discord: the gateway, from which the events come, and the HTTP API, with
 //! which PuppyBot answers them.
 
-use std::cell::OnceCell;
-use std::collections::BTreeSet;
+use std::cell::{OnceCell, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as StdError;
 use std::fmt;
 use std::time::Duration;
 
 use puppybot_core::dice::Dice;
+use puppybot_core::games::{Coin, GameText, Guessing, Hand, Hint};
 use puppybot_core::i18n::Lang;
 use puppybot_core::poll::Poll;
 use puppybot_core::text::Text;
@@ -26,7 +27,7 @@ use twilight_model::id::Id;
 use twilight_model::id::marker::{ChannelMarker, GuildMarker, MessageMarker};
 use twilight_model::util::Timestamp;
 
-use crate::commands::{self, Audience, Request};
+use crate::commands::{self, Answer, Audience, Request};
 use crate::config::DiscordConfig;
 use crate::shutdown::{Signals, Stop};
 use crate::storage::Settings;
@@ -126,6 +127,7 @@ impl Discord {
                 settings,
                 mentions: OnceCell::new(),
                 die: crate::random::die,
+                games: RefCell::new(BTreeMap::new()),
             },
         }
     }
@@ -175,6 +177,8 @@ struct Bot {
     mentions: OnceCell<[String; 2]>,
     /// A die with so many sides, see [`crate::random::die`], or another one in tests.
     die: fn(u32) -> Option<u32>,
+    /// The games of guessing a number that run, by channel. A restart ends them.
+    games: RefCell<BTreeMap<Id<ChannelMarker>, Guessing>>,
 }
 
 impl Bot {
@@ -230,8 +234,7 @@ impl Bot {
             return;
         };
         let channel = interaction.channel.as_ref().map(|channel| channel.id);
-        let (content, audience) = self.execute(asked.request, asked.lang, channel).await;
-        let response = commands::response(content, audience);
+        let response = commands::response(self.execute(asked.request, asked.lang, channel).await);
         let answer = self.http.interaction(interaction.application_id);
         if let Err(error) = answer
             .create_response(interaction.id, &interaction.token, &response)
@@ -247,8 +250,28 @@ impl Bot {
         request: Request<'_>,
         lang: Lang,
         channel: Option<Id<ChannelMarker>>,
-    ) -> (String, Audience) {
+    ) -> Answer {
+        let everyone = |content| Answer::new(content, Audience::Everyone);
         let content = match request {
+            Request::Coin => return everyone(self.coin(lang)),
+            Request::EightBall(question) => return everyone(self.eight_ball(question, lang)),
+            Request::RpsChoose => {
+                return Answer {
+                    buttons: commands::rps_buttons(lang),
+                    ..everyone(GameText::RpsChoose.render(lang))
+                };
+            }
+            Request::RpsPlay { hand, player } => {
+                return Answer {
+                    update: true,
+                    ..everyone(self.rps(hand, player, lang))
+                };
+            }
+            Request::Guess {
+                number,
+                max,
+                player,
+            } => return everyone(self.guess(channel, number, max, player, lang)),
             Request::ServerInfo(guild) => server_text(self.server(guild).await, lang),
             Request::Poll(poll) => {
                 let posted = match channel {
@@ -263,7 +286,7 @@ impl Bot {
                 } else {
                     Audience::Everyone
                 };
-                return (self.rolled(&dice, lang), audience);
+                return Answer::new(self.rolled(&dice, lang), audience);
             }
             Request::Answer(text) => text.render(lang),
             Request::ShowLanguage(guild) => match self.settings.language(guild) {
@@ -308,7 +331,81 @@ impl Bot {
                 }
             },
         };
-        (content, Audience::Asker)
+        Answer::new(content, Audience::Asker)
+    }
+
+    /// Flips a coin, and returns the answer, in `lang`.
+    fn coin(&self, lang: Lang) -> String {
+        let mut die = self.die;
+        Coin::flip(&mut die)
+            .map_or(GameText::GameFailed, GameText::Coin)
+            .render(lang)
+    }
+
+    /// Asks the magic 8-ball `question`, and returns its answer, in `lang`.
+    fn eight_ball(&self, question: &str, lang: Lang) -> String {
+        let mut die = self.die;
+        puppybot_core::games::eight_ball(&mut die)
+            .map_or(GameText::GameFailed, |answer| GameText::EightBall {
+                question,
+                answer,
+            })
+            .render(lang)
+    }
+
+    /// Plays `hand` of `player` against a hand of PuppyBot, and returns the outcome, in `lang`.
+    fn rps(&self, hand: Hand, player: &str, lang: Lang) -> String {
+        let mut die = self.die;
+        Hand::choose(&mut die)
+            .map_or(GameText::GameFailed, |bot| GameText::RpsPlayed {
+                player,
+                hand,
+                bot,
+            })
+            .render(lang)
+    }
+
+    /// A guess of `number` by `player` in `channel`: without a number, a new game up to `max`, if
+    /// none runs there. Returns the answer, in `lang`.
+    fn guess(
+        &self,
+        channel: Option<Id<ChannelMarker>>,
+        number: Option<u32>,
+        max: Option<u32>,
+        player: &str,
+        lang: Lang,
+    ) -> String {
+        let Some(channel) = channel else {
+            return GameText::GameFailed.render(lang);
+        };
+        let mut games = self.games.borrow_mut();
+        let text = if let Some(game) = games.get_mut(&channel) {
+            if let Some(number) = number {
+                let hint = game.guess(number);
+                let max = game.max();
+                if matches!(hint, Hint::Right { .. }) {
+                    games.remove(&channel);
+                }
+                GameText::Guessed {
+                    player,
+                    number,
+                    hint,
+                    max,
+                }
+            } else {
+                GameText::GuessRunning { max: game.max() }
+            }
+        } else {
+            let mut die = self.die;
+            match Guessing::new(max.unwrap_or(Guessing::DEFAULT_MAX), &mut die) {
+                Some(game) => {
+                    games.insert(channel, game);
+                    GameText::GuessStarted { max: game.max() }
+                }
+                None => GameText::GameFailed,
+            }
+        };
+        text.render(lang)
     }
 
     /// The server `guild`, as Discord says, with about how many members it has.
@@ -388,6 +485,15 @@ impl Bot {
             },
             TextCommand::Server => server_text(self.server(guild).await, lang),
             TextCommand::User => user_text(message, lang),
+            TextCommand::Coin => self.coin(lang),
+            TextCommand::EightBall => self.eight_ball(arguments, lang),
+            TextCommand::Rps => GameText::RpsChoose.render(lang),
+            TextCommand::Guess => {
+                let author = &message.author;
+                let player = author.global_name.as_deref().unwrap_or(&author.name);
+                let number = arguments.parse().ok();
+                self.guess(Some(message.channel_id), number, None, player, lang)
+            }
             // The poll is the answer.
             TextCommand::Poll => match Poll::parse(arguments) {
                 Ok(poll) => {
@@ -399,10 +505,16 @@ impl Bot {
             },
         };
         let nobody = AllowedMentions::default();
+        let buttons = if command == TextCommand::Rps {
+            commands::buttons(&commands::rps_buttons(lang))
+        } else {
+            Vec::new()
+        };
         let reply = self
             .http
             .create_message(message.channel_id)
             .content(&content)
+            .components(&buttons)
             .reply(message.id)
             // Also if the message is gone by now.
             .fail_if_not_exists(false)
@@ -557,7 +669,13 @@ mod tests {
             mentions: OnceCell::new(),
             // Every die at its most.
             die: Some,
+            games: RefCell::new(BTreeMap::new()),
         }
+    }
+
+    /// The text of `answer`, and who sees it.
+    fn said(answer: Answer) -> (String, Audience) {
+        (answer.content, answer.audience)
     }
 
     /// The message `content` on the server [`GUILD`], by a person, as Discord's gateway sends
@@ -600,27 +718,35 @@ mod tests {
             let guild = Id::new(GUILD);
             let en = |text: Text<'_>| (text.render(Lang::En), Audience::Asker);
             assert_eq!(
-                bot.execute(Request::ShowLanguage(guild), Lang::En, None)
-                    .await,
+                said(
+                    bot.execute(Request::ShowLanguage(guild), Lang::En, None)
+                        .await
+                ),
                 en(Text::LanguageIs { chosen: None })
             );
             assert_eq!(bot.language(guild), Lang::En);
             assert_eq!(
-                bot.execute(Request::SetLanguage(guild, Lang::De), Lang::En, None)
-                    .await,
+                said(
+                    bot.execute(Request::SetLanguage(guild, Lang::De), Lang::En, None)
+                        .await
+                ),
                 en(Text::LanguageSet { lang: Lang::De })
             );
             assert_eq!(
-                bot.execute(Request::ShowLanguage(guild), Lang::En, None)
-                    .await,
+                said(
+                    bot.execute(Request::ShowLanguage(guild), Lang::En, None)
+                        .await
+                ),
                 en(Text::LanguageIs {
                     chosen: Some(Lang::De)
                 })
             );
             assert_eq!(bot.language(guild), Lang::De);
             assert_eq!(
-                bot.execute(Request::Answer(Text::NotHere), Lang::De, None)
-                    .await,
+                said(
+                    bot.execute(Request::Answer(Text::NotHere), Lang::De, None)
+                        .await
+                ),
                 (Text::NotHere.render(Lang::De), Audience::Asker)
             );
         });
@@ -633,19 +759,25 @@ mod tests {
             let guild = Id::new(GUILD);
             let en = |text: Text<'_>| (text.render(Lang::En), Audience::Asker);
             assert_eq!(
-                bot.execute(Request::ShowPrefix(guild), Lang::En, None)
-                    .await,
+                said(
+                    bot.execute(Request::ShowPrefix(guild), Lang::En, None)
+                        .await
+                ),
                 en(Text::PrefixIs { chosen: None })
             );
             assert_eq!(bot.prefix(guild), "!");
             assert_eq!(
-                bot.execute(Request::SetPrefix(guild, "pb?"), Lang::En, None)
-                    .await,
+                said(
+                    bot.execute(Request::SetPrefix(guild, "pb?"), Lang::En, None)
+                        .await
+                ),
                 en(Text::PrefixSet { prefix: "pb?" })
             );
             assert_eq!(
-                bot.execute(Request::ShowPrefix(guild), Lang::En, None)
-                    .await,
+                said(
+                    bot.execute(Request::ShowPrefix(guild), Lang::En, None)
+                        .await
+                ),
                 en(Text::PrefixIs {
                     chosen: Some("pb?")
                 })
@@ -664,11 +796,11 @@ mod tests {
             };
             let rolled = "`2d6+3` gives [6, 6] + 3 = **15**".to_owned();
             assert_eq!(
-                bot.execute(roll(false), Lang::En, None).await,
+                said(bot.execute(roll(false), Lang::En, None).await),
                 (rolled.clone(), Audience::Everyone)
             );
             assert_eq!(
-                bot.execute(roll(true), Lang::En, None).await,
+                said(bot.execute(roll(true), Lang::En, None).await),
                 (rolled, Audience::Asker)
             );
 
@@ -676,7 +808,7 @@ mod tests {
             let mut bot = bot;
             bot.die = |_| None;
             assert_eq!(
-                bot.execute(roll(false), Lang::De, None).await,
+                said(bot.execute(roll(false), Lang::De, None).await),
                 (Text::DiceFailed.render(Lang::De), Audience::Everyone)
             );
         });
@@ -689,9 +821,9 @@ mod tests {
             let poll = || Request::Poll(Poll::parse("Pizza? | Ja | Nein").unwrap());
             let failed = (Text::PollFailed.render(Lang::En), Audience::Asker);
             // Without a channel, and in one where the API fails.
-            assert_eq!(bot.execute(poll(), Lang::En, None).await, failed);
+            assert_eq!(said(bot.execute(poll(), Lang::En, None).await), failed);
             assert_eq!(
-                bot.execute(poll(), Lang::En, Some(Id::new(4))).await,
+                said(bot.execute(poll(), Lang::En, Some(Id::new(4))).await),
                 failed
             );
         });
@@ -721,8 +853,10 @@ mod tests {
             // With an API that fails.
             let bot = bot(Box::new(Storage::in_memory()));
             assert_eq!(
-                bot.execute(Request::ServerInfo(Id::new(GUILD)), Lang::En, None)
-                    .await,
+                said(
+                    bot.execute(Request::ServerInfo(Id::new(GUILD)), Lang::En, None)
+                        .await
+                ),
                 (Text::InfoFailed.render(Lang::En), Audience::Asker)
             );
         });
@@ -765,6 +899,119 @@ mod tests {
     }
 
     #[test]
+    fn games() {
+        in_runtime(async {
+            let bot = bot(Box::new(Storage::in_memory()));
+            let everyone = |text: GameText<'_>| (text.render(Lang::En), Audience::Everyone);
+            assert_eq!(
+                said(bot.execute(Request::Coin, Lang::En, None).await),
+                everyone(GameText::Coin(Coin::Tails))
+            );
+            assert_eq!(
+                said(
+                    bot.execute(Request::EightBall("Sonne?"), Lang::En, None)
+                        .await
+                ),
+                everyone(GameText::EightBall {
+                    question: "Sonne?",
+                    answer: 19
+                })
+            );
+            let choose = bot.execute(Request::RpsChoose, Lang::De, None).await;
+            assert_eq!(choose.content, GameText::RpsChoose.render(Lang::De));
+            assert_eq!(choose.buttons, commands::rps_buttons(Lang::De));
+            let played = Request::RpsPlay {
+                hand: Hand::Rock,
+                player: "Puppy",
+            };
+            let played = bot.execute(played, Lang::En, None).await;
+            assert!(played.update);
+            assert_eq!(
+                played.content,
+                "**Puppy** chose rock, PuppyBot scissors: **Puppy wins!**"
+            );
+        });
+    }
+
+    #[test]
+    fn guessing_a_number() {
+        in_runtime(async {
+            let bot = bot(Box::new(Storage::in_memory()));
+            let channel = Some(Id::new(4));
+            let guess = |number| Request::Guess {
+                number,
+                max: Some(10),
+                player: "Puppy",
+            };
+            let answer = |text: GameText<'_>| (text.render(Lang::En), Audience::Everyone);
+            // A new game, whose number is 10, as every die is at its most.
+            assert_eq!(
+                said(bot.execute(guess(Some(3)), Lang::En, channel).await),
+                answer(GameText::GuessStarted { max: 10 })
+            );
+            assert_eq!(
+                said(bot.execute(guess(None), Lang::En, channel).await),
+                answer(GameText::GuessRunning { max: 10 })
+            );
+            let guessed = |number, hint| GameText::Guessed {
+                player: "Puppy",
+                number,
+                hint,
+                max: 10,
+            };
+            assert_eq!(
+                said(bot.execute(guess(Some(3)), Lang::En, channel).await),
+                answer(guessed(3, Hint::Higher))
+            );
+            assert_eq!(
+                said(bot.execute(guess(Some(11)), Lang::En, channel).await),
+                answer(guessed(11, Hint::Outside))
+            );
+            assert_eq!(
+                said(bot.execute(guess(Some(10)), Lang::En, channel).await),
+                answer(guessed(10, Hint::Right { tries: 2 }))
+            );
+            // Over: the next starts a new one.
+            assert_eq!(
+                said(bot.execute(guess(Some(5)), Lang::En, channel).await),
+                answer(GameText::GuessStarted { max: 10 })
+            );
+            // Without a channel, no game.
+            assert_eq!(
+                said(bot.execute(guess(None), Lang::En, None).await),
+                answer(GameText::GameFailed)
+            );
+        });
+    }
+
+    #[test]
+    fn games_without_randomness() {
+        in_runtime(async {
+            let mut bot = bot(Box::new(Storage::in_memory()));
+            bot.die = |_| None;
+            let failed = (GameText::GameFailed.render(Lang::En), Audience::Everyone);
+            for request in [
+                Request::Coin,
+                Request::EightBall(""),
+                Request::RpsPlay {
+                    hand: Hand::Paper,
+                    player: "Puppy",
+                },
+                Request::Guess {
+                    number: None,
+                    max: None,
+                    player: "Puppy",
+                },
+            ] {
+                let answer = bot
+                    .execute(request.clone(), Lang::En, Some(Id::new(4)))
+                    .await;
+                assert_eq!(said(answer), failed, "{request:?}");
+            }
+        });
+    }
+
+    #[test]
     fn settings_that_fail() {
         in_runtime(async {
             let bot = bot(Box::new(Broken));
@@ -776,7 +1023,7 @@ mod tests {
                 Request::SetPrefix(guild, "?"),
             ] {
                 assert_eq!(
-                    bot.execute(request.clone(), Lang::De, None).await,
+                    said(bot.execute(request.clone(), Lang::De, None).await),
                     (Text::StorageFailed.render(Lang::De), Audience::Asker),
                     "{request:?}"
                 );

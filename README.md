@@ -36,9 +36,13 @@ PuppyBot registers its commands only on the servers in `guilds`, and leaves any 
 | `/poll`, in German `/umfrage` | Posts a [poll](#polls) in the channel, which Discord shows and counts |
 | `/server` | Shows when the server was created, and about how many members it has |
 | `/user`, in German `/nutzer` | Shows since when someone, by default the person who asked, is on Discord and on the server |
+| `/coin`, in German `/münze` | Flips a coin |
+| `/8ball`, in German `/8kugel` | Asks the magic 8-ball, with a `question` or without |
+| `/rps`, in German `/ssp` | Rock, paper, scissors against PuppyBot, with buttons, see [Games](#games) |
+| `/guess`, in German `/raten` | Guessing a number: without `number` a new game, up to `max`, by default 100; with it a guess, see [Games](#games) |
 | `/settings prefix` | Shows the prefix of the text commands on the server, or changes it with `to`: 1 to 5 characters of ASCII that one can see, but no spaces and none of `` < > @ # : / ` ``, by default `!`. Only for people who may manage the server |
 
-PuppyBot's answers are shown only to the person who asked, except those of `/dice`, and mention nobody. Names and what else people wrote appear as they are, not as Markdown, links or mentions. Dates are Discord's timestamps, which Discord shows in the language and time zone of each reader. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
+PuppyBot's answers are shown only to the person who asked, except those of `/dice` and of the games, which everyone in the channel sees, and mention nobody. Names and what else people wrote appear as they are, not as Markdown, links or mentions. Dates are Discord's timestamps, which Discord shows in the language and time zone of each reader. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
 
 Discord shows `/settings` only to people with the permission "Manage Server" or "Administrator". The server's admins can allow it to others in the server settings (Integrations), but PuppyBot answers only those who have one of the two permissions.
 
@@ -53,6 +57,10 @@ Messages that start with the prefix of the server, `!` unless someone chose anot
 | `!poll`, `!umfrage` | Posts a [poll](#polls), e.g. `!umfrage Pizza oder Pasta? \| Pizza \| Pasta` |
 | `!server` | Shows when the server was created, and about how many members it has |
 | `!user`, `!nutzer` | Shows since when the first person that the message mentions, or its author, is on Discord and on the server |
+| `!coin`, `!münze` | Flips a coin |
+| `!8ball`, `!8kugel` | Asks the magic 8-ball, e.g. `!8kugel Scheint morgen die Sonne?` |
+| `!rps`, `!ssp` | Rock, paper, scissors against PuppyBot, with buttons |
+| `!guess`, `!rate`, `!raten` | Guessing a number: without a number a new game up to 100, with one a guess, e.g. `!rate 42` |
 | `!help`, `!hilfe` | Shows the text commands and the prefix |
 
 - The names work in any case, e.g. `!Hilfe`, and directly after the prefix: `! info` is no command.
@@ -79,6 +87,14 @@ PuppyBot posts polls as Discord's own, which Discord shows and counts; nobody's 
 | `2d20kl1` | Two dice, of which the lowest counts |
 
 The case doesn't matter, and spaces may stand around `+` and `-`. PuppyBot rolls at most 100 dice at once, with up to 1000 sides, in at most 20 terms, with numbers up to 1000000, and expressions of up to 100 characters. The dice come from the randomness of the system, through ring, which TLS uses too, so nobody can guess the next roll from the last ones. Dice that don't count are struck through, e.g. `[6, ~~2~~, 5] = **11**`.
+
+### Games
+
+The games answer in the channel, for everyone there. Their randomness is the system's, as that of the dice.
+
+- **The coin** shows heads or tails, and **the magic 8-ball** one of its 20 classic answers. PuppyBot repeats the question as it was written, without Markdown.
+- **Rock, paper, scissors:** `/rps` and `!rps` post a message with a button for each hand. Whoever clicks one first plays against a hand that PuppyBot chooses then, and the outcome takes the place of the buttons: each message is one game.
+- **Guessing a number:** without a number, `/guess` and `!rate` start a game in the channel, in which PuppyBot thinks of a number from 1 to `max`: by default 100, at most 1000000, with `!rate` always 100. Everyone in the channel guesses, e.g. with `/guess number: 42` or `!rate 42`, and hears whether the number is higher or lower; guesses outside the range don't count. Whoever hits it ends the game. A channel has one game at a time, which PuppyBot keeps only in its memory: a restart ends it.
 
 ## Docker
 

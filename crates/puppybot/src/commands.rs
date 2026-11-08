@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 
 use puppybot_core::dice::{self, Dice};
+use puppybot_core::games::{GameText, Guessing, Hand};
 use puppybot_core::i18n::Lang;
 use puppybot_core::poll::{self, Poll};
 use puppybot_core::text::Text;
@@ -15,9 +16,10 @@ use twilight_model::application::interaction::application_command::{
 use twilight_model::application::interaction::{
     Interaction, InteractionContextType, InteractionData, InteractionType,
 };
-use twilight_model::channel::message::{AllowedMentions, MessageFlags};
+use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
+use twilight_model::channel::message::{AllowedMentions, Component, MessageFlags};
 use twilight_model::guild::Permissions;
-use twilight_model::http::interaction::InteractionResponse;
+use twilight_model::http::interaction::{InteractionResponse, InteractionResponseType};
 use twilight_model::id::Id;
 use twilight_model::id::marker::GuildMarker;
 use twilight_model::util::Timestamp;
@@ -92,8 +94,57 @@ pub fn commands() -> Vec<Command> {
                 .description_localizations([(GERMAN, Text::UserWhoDescription.render(Lang::De))]),
         )
         .build(),
+        game("coin", "münze", GameText::CoinDescription).build(),
+        game("8ball", "8kugel", GameText::EightBallDescription)
+            .option(
+                StringBuilder::new(
+                    "question",
+                    GameText::EightBallQuestionDescription.render(Lang::En),
+                )
+                .name_localizations([(GERMAN, "frage")])
+                .description_localizations([(
+                    GERMAN,
+                    GameText::EightBallQuestionDescription.render(Lang::De),
+                )])
+                .max_length(u16::try_from(poll::MAX_QUESTION).unwrap_or(u16::MAX)),
+            )
+            .build(),
+        game("rps", "ssp", GameText::RpsDescription).build(),
+        game("guess", "raten", GameText::GuessDescription)
+            .option(
+                IntegerBuilder::new("number", GameText::GuessNumberDescription.render(Lang::En))
+                    .name_localizations([(GERMAN, "zahl")])
+                    .description_localizations([(
+                        GERMAN,
+                        GameText::GuessNumberDescription.render(Lang::De),
+                    )])
+                    .min_value(1)
+                    .max_value(i64::from(Guessing::MAX)),
+            )
+            .option(
+                IntegerBuilder::new("max", GameText::GuessMaxDescription.render(Lang::En))
+                    .name_localizations([(GERMAN, "bis")])
+                    .description_localizations([(
+                        GERMAN,
+                        GameText::GuessMaxDescription.render(Lang::De),
+                    )])
+                    .min_value(2)
+                    .max_value(i64::from(Guessing::MAX)),
+            )
+            .build(),
     ]
 }
+
+/// The slash command of a game, `name`, in German `german`, with its `description`.
+fn game(name: &str, german: &str, description: GameText<'_>) -> CommandBuilder {
+    CommandBuilder::new(name, description.render(Lang::En), CommandType::ChatInput)
+        .name_localizations([(GERMAN, german)])
+        .description_localizations([(GERMAN, description.render(Lang::De))])
+        .contexts([InteractionContextType::Guild])
+}
+
+/// The prefix of the IDs of the buttons of rock, paper, scissors, before the hand's.
+pub const RPS: &str = "rps:";
 
 /// When the thing with the ID `id` came to Discord, in seconds since 1970: Discord's IDs begin
 /// with the milliseconds since 2015.
@@ -206,6 +257,28 @@ pub enum Request<'a> {
     Poll(Poll),
     /// When the server was created, and how many members it has: /server.
     ServerInfo(Id<GuildMarker>),
+    /// A coin: /coin.
+    Coin,
+    /// The magic 8-ball, with the question: /8ball.
+    EightBall(&'a str),
+    /// The buttons of rock, paper, scissors: /rps.
+    RpsChoose,
+    /// A game of rock, paper, scissors: someone clicked a button.
+    RpsPlay {
+        /// Their hand.
+        hand: Hand,
+        /// Their name.
+        player: &'a str,
+    },
+    /// Guessing a number: /guess.
+    Guess {
+        /// The guess, none to start a game, or to see the one that runs.
+        number: Option<u32>,
+        /// The largest number of a new game.
+        max: Option<u32>,
+        /// The name of the person who guessed.
+        player: &'a str,
+    },
     /// A roll of `dice`, which only the asker sees if it is `secret`: /dice.
     Roll {
         /// What to roll.
@@ -240,29 +313,97 @@ pub fn request<'a>(
     interaction: &'a Interaction,
     guilds: &BTreeSet<Id<GuildMarker>>,
 ) -> Option<Asked<'a>> {
-    let Some(InteractionData::ApplicationCommand(command)) = &interaction.data else {
-        return None;
-    };
-    if interaction.kind != InteractionType::ApplicationCommand {
-        return None;
-    }
-    let request = match interaction.guild_id {
-        Some(guild) if guilds.contains(&guild) => match command.name.as_str() {
-            "info" => Request::Answer(Text::Info {
-                version: crate::VERSION,
-            }),
-            "settings" if may_change_settings(interaction) => settings(command, guild),
-            "settings" => Request::Answer(Text::NotAllowed),
-            "dice" => roll(command),
-            "poll" => poll_request(command),
-            "server" => Request::ServerInfo(guild),
-            "user" => user_info(interaction, command),
-            _ => Request::Answer(Text::UnknownCommand),
-        },
-        _ => Request::Answer(Text::NotHere),
+    let on_server = interaction.guild_id.filter(|guild| guilds.contains(guild));
+    let request = match (&interaction.data, interaction.kind, on_server) {
+        (
+            Some(InteractionData::ApplicationCommand(command)),
+            InteractionType::ApplicationCommand,
+            Some(guild),
+        ) => slash(interaction, command, guild),
+        (
+            Some(InteractionData::MessageComponent(component)),
+            InteractionType::MessageComponent,
+            Some(_),
+        ) => {
+            let hand = component
+                .custom_id
+                .strip_prefix(RPS)
+                .and_then(Hand::from_id)?;
+            Request::RpsPlay {
+                hand,
+                player: name(interaction),
+            }
+        }
+        (
+            Some(InteractionData::ApplicationCommand(_) | InteractionData::MessageComponent(_)),
+            InteractionType::ApplicationCommand | InteractionType::MessageComponent,
+            None,
+        ) => Request::Answer(Text::NotHere),
+        _ => return None,
     };
     let lang = Lang::from_locale(interaction.locale.as_deref().unwrap_or_default());
     Some(Asked { request, lang })
+}
+
+/// The name of the person who sent `interaction`.
+fn name(interaction: &Interaction) -> &str {
+    interaction
+        .member
+        .as_ref()
+        .and_then(|member| member.user.as_ref())
+        .map_or("?", |user| {
+            user.global_name.as_deref().unwrap_or(&user.name)
+        })
+}
+
+/// What the slash command `command` on `guild` asks for.
+fn slash<'a>(
+    interaction: &'a Interaction,
+    command: &'a CommandData,
+    guild: Id<GuildMarker>,
+) -> Request<'a> {
+    match command.name.as_str() {
+        "info" => Request::Answer(Text::Info {
+            version: crate::VERSION,
+        }),
+        "settings" if may_change_settings(interaction) => settings(command, guild),
+        "settings" => Request::Answer(Text::NotAllowed),
+        "dice" => roll(command),
+        "poll" => poll_request(command),
+        "server" => Request::ServerInfo(guild),
+        "user" => user_info(interaction, command),
+        "coin" => Request::Coin,
+        "8ball" => Request::EightBall(string(command, "question").unwrap_or_default()),
+        "rps" => Request::RpsChoose,
+        "guess" => Request::Guess {
+            number: number(command, "number"),
+            max: number(command, "max"),
+            player: name(interaction),
+        },
+        _ => Request::Answer(Text::UnknownCommand),
+    }
+}
+
+/// The text of the option `name` of `command`, none if it has none.
+fn string<'a>(command: &'a CommandData, name: &str) -> Option<&'a str> {
+    command
+        .options
+        .iter()
+        .find_map(|option| match &option.value {
+            CommandOptionValue::String(text) if option.name == name => Some(text.as_str()),
+            _ => None,
+        })
+}
+
+/// The whole number of the option `name` of `command`, none if it has none, or a negative one.
+fn number(command: &CommandData, name: &str) -> Option<u32> {
+    command
+        .options
+        .iter()
+        .find_map(|option| match option.value {
+            CommandOptionValue::Integer(value) if option.name == name => u32::try_from(value).ok(),
+            _ => None,
+        })
 }
 
 /// Whether the person who sent `interaction` may manage its server, as Discord says, also
@@ -397,17 +538,89 @@ fn poll_request(command: &CommandData) -> Request<'static> {
     }
 }
 
-/// The answer with `content` for `audience`, which mentions nobody.
+/// An answer of PuppyBot to an interaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    /// The text.
+    pub content: String,
+    /// Who sees it.
+    pub audience: Audience,
+    /// Buttons under the text: their IDs and labels.
+    pub buttons: Vec<(String, String)>,
+    /// Whether it takes the place of the message whose button someone clicked.
+    pub update: bool,
+}
+
+impl Answer {
+    /// An answer with `content` for `audience`, without buttons.
+    #[must_use]
+    pub const fn new(content: String, audience: Audience) -> Self {
+        Self {
+            content,
+            audience,
+            buttons: Vec::new(),
+            update: false,
+        }
+    }
+}
+
+/// The response with `answer`, which mentions nobody.
 #[must_use]
-pub fn response(content: String, audience: Audience) -> InteractionResponse {
+pub fn response(answer: Answer) -> InteractionResponse {
     let message = ChannelMessageBuilder::new()
-        .content(content)
-        .allowed_mentions(AllowedMentions::default());
-    match audience {
+        .content(answer.content)
+        .allowed_mentions(AllowedMentions::default())
+        .components(buttons(&answer.buttons));
+    let mut response = match answer.audience {
         Audience::Asker => message.flags(MessageFlags::EPHEMERAL),
         Audience::Everyone => message,
     }
-    .build()
+    .build();
+    if answer.update {
+        response.kind = InteractionResponseType::UpdateMessage;
+    }
+    response
+}
+
+/// A row of buttons with these IDs and labels, none if there are none.
+#[must_use]
+pub fn buttons(buttons: &[(String, String)]) -> Vec<Component> {
+    if buttons.is_empty() {
+        return Vec::new();
+    }
+    let row = buttons
+        .iter()
+        .map(|(id, label)| {
+            Component::Button(Button {
+                custom_id: Some(id.clone()),
+                disabled: false,
+                emoji: None,
+                id: None,
+                label: Some(label.clone()),
+                sku_id: None,
+                style: ButtonStyle::Primary,
+                url: None,
+            })
+        })
+        .collect();
+    vec![Component::ActionRow(ActionRow {
+        components: row,
+        id: None,
+    })]
+}
+
+/// The buttons of rock, paper, scissors, labeled in `lang`.
+#[must_use]
+pub fn rps_buttons(lang: Lang) -> Vec<(String, String)> {
+    Hand::ALL
+        .into_iter()
+        .map(|hand| {
+            (
+                format!("{RPS}{}", hand.id()),
+                GameText::Hand(hand).render(lang),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -798,16 +1011,132 @@ pub(crate) mod tests {
         assert_eq!(created(u64::MAX), 5_818_116_911);
     }
 
+    /// A click on the button `id` on the server `guild`, as Discord sends it.
+    fn button(id: &str, guild: u64) -> Interaction {
+        serde_json::from_str(&format!(
+            r#"{{"id": "1200000000000000001", "application_id": "1200000000000000002", "type": 3,
+            "token": "interaction-token", "version": 1, "locale": "de",
+            "attachment_size_limit": 26214400, "authorizing_integration_owners": {{}},
+            "entitlements": [], "guild_id": "{guild}",
+            "member": {{"deaf": false, "mute": false, "flags": 0, "roles": [], "joined_at": null,
+                "permissions": "0", "user": {{"id": "1400000000000000005", "username": "puppy",
+                "global_name": "Puppy", "discriminator": "0", "avatar": null}}}},
+            "data": {{"custom_id": "{id}", "component_type": 2}}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn games() {
+        let game = |name, options| command(name, options, "de", 0);
+        assert_eq!(asked(&game("coin", "[]")).0, Request::Coin);
+        let question = r#"[{"name": "question", "type": 3, "value": "Sonne?"}]"#;
+        assert_eq!(
+            asked(&game("8ball", question)).0,
+            Request::EightBall("Sonne?")
+        );
+        assert_eq!(asked(&game("8ball", "[]")).0, Request::EightBall(""));
+        // A question that isn't a text, which Discord doesn't send: as none.
+        let question = r#"[{"name": "question", "type": 4, "value": 8}]"#;
+        assert_eq!(asked(&game("8ball", question)).0, Request::EightBall(""));
+        assert_eq!(asked(&game("rps", "[]")).0, Request::RpsChoose);
+        let options = r#"[{"name": "number", "type": 4, "value": 42}, {"name": "max", "type": 4, "value": 50}]"#;
+        assert_eq!(
+            asked(&game("guess", options)).0,
+            Request::Guess {
+                number: Some(42),
+                max: Some(50),
+                player: "puppy"
+            }
+        );
+        // Discord's limits don't allow negative numbers: as none.
+        let options = r#"[{"name": "number", "type": 4, "value": -1}, {"name": "max", "type": 3, "value": "x"}]"#;
+        assert_eq!(
+            asked(&game("guess", options)).0,
+            Request::Guess {
+                number: None,
+                max: None,
+                player: "puppy"
+            }
+        );
+    }
+
+    #[test]
+    fn buttons_of_rock_paper_scissors() {
+        assert_eq!(
+            asked(&button("rps:rock", GUILD)).0,
+            Request::RpsPlay {
+                hand: Hand::Rock,
+                player: "Puppy"
+            }
+        );
+        // Of no game, or outside the servers.
+        assert_eq!(request(&button("rps:lizard", GUILD), &guilds()), None);
+        assert_eq!(request(&button("other", GUILD), &guilds()), None);
+        assert_eq!(
+            asked(&button("rps:rock", GUILD + 1)).0,
+            Request::Answer(Text::NotHere)
+        );
+        let mut nobody = button("rps:paper", GUILD);
+        nobody.member = None;
+        assert_eq!(
+            asked(&nobody).0,
+            Request::RpsPlay {
+                hand: Hand::Paper,
+                player: "?"
+            }
+        );
+    }
+
+    #[test]
+    fn answers_with_buttons() {
+        // The buttons, and the answer that takes the place of their message.
+        let answer = Answer {
+            buttons: rps_buttons(Lang::En),
+            update: true,
+            ..Answer::new("Rock, paper or scissors?".to_owned(), Audience::Everyone)
+        };
+        let response = response(answer);
+        assert_eq!(response.kind, InteractionResponseType::UpdateMessage);
+        let components = response.data.unwrap().components.unwrap();
+        let button = |id: &str, label: &str| {
+            Component::Button(Button {
+                custom_id: Some(id.to_owned()),
+                disabled: false,
+                emoji: None,
+                id: None,
+                label: Some(label.to_owned()),
+                sku_id: None,
+                style: ButtonStyle::Primary,
+                url: None,
+            })
+        };
+        assert_eq!(
+            components,
+            [Component::ActionRow(ActionRow {
+                components: vec![
+                    button("rps:rock", "Rock"),
+                    button("rps:paper", "Paper"),
+                    button("rps:scissors", "Scissors"),
+                ],
+                id: None,
+            })]
+        );
+        assert_eq!(buttons(&[]), []);
+    }
+
     #[test]
     fn answers_for_everyone_in_the_channel() {
-        let data = response("4".to_owned(), Audience::Everyone).data.unwrap();
+        let data = response(Answer::new("4".to_owned(), Audience::Everyone))
+            .data
+            .unwrap();
         assert_eq!(data.flags, None);
         assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
     }
 
     #[test]
     fn answers_only_for_the_person_who_asked() {
-        let response = response(Text::NotHere.render(Lang::En), Audience::Asker);
+        let response = response(Answer::new(Text::NotHere.render(Lang::En), Audience::Asker));
         assert_eq!(
             response.kind,
             InteractionResponseType::ChannelMessageWithSource
@@ -900,7 +1229,10 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             names,
-            ["info", "settings", "dice", "poll", "server", "user"]
+            [
+                "info", "settings", "dice", "poll", "server", "user", "coin", "8ball", "rps",
+                "guess"
+            ]
         );
         for command in &commands {
             let german = &command.description_localizations.as_ref().unwrap()["de"];
