@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::time::Duration;
 
+use puppybot_core::text::Text;
 use secrecy::{ExposeSecret, SecretString};
 use twilight_gateway::{
     CloseFrame, ConfigBuilder, Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _,
@@ -16,9 +17,10 @@ use twilight_model::gateway::payload::incoming::Ready;
 use twilight_model::id::Id;
 use twilight_model::id::marker::GuildMarker;
 
-use crate::commands;
+use crate::commands::{self, Request};
 use crate::config::DiscordConfig;
 use crate::shutdown::{Signals, Stop};
+use crate::storage::Settings;
 
 /// What PuppyBot gets from the gateway: events of its servers, for which Discord asks no
 /// permission. Slash commands come without an intent.
@@ -86,10 +88,10 @@ pub struct Discord {
 }
 
 impl Discord {
-    /// The connection with `token`, as `config` says, after [`prepare_tls`]. It connects once
-    /// [`Self::run`] runs.
+    /// The connection with `token`, as `config` says, after [`prepare_tls`], with the settings
+    /// of the servers in `settings`. It connects once [`Self::run`] runs.
     #[must_use]
-    pub fn new(config: &DiscordConfig, token: &SecretString) -> Self {
+    pub fn new(config: &DiscordConfig, token: &SecretString, settings: Box<dyn Settings>) -> Self {
         let token = token.expose_secret().to_owned();
         let mut http = Client::builder()
             .token(token.clone())
@@ -107,6 +109,7 @@ impl Discord {
             bot: Bot {
                 http: http.build(),
                 guilds: config.guilds.iter().map(|&guild| Id::from(guild)).collect(),
+                settings,
             },
         }
     }
@@ -150,6 +153,8 @@ struct Bot {
     http: Client,
     /// The servers of PuppyBot, from the configuration.
     guilds: BTreeSet<Id<GuildMarker>>,
+    /// The settings of the servers.
+    settings: Box<dyn Settings>,
 }
 
 impl Bot {
@@ -197,9 +202,10 @@ impl Bot {
 
     /// A slash command, or another interaction: answers the slash commands.
     async fn interaction(&self, interaction: &Interaction) {
-        let Some(response) = commands::answer(interaction, &self.guilds) else {
+        let Some(asked) = commands::request(interaction, &self.guilds) else {
             return;
         };
+        let response = commands::response(&self.execute(asked.request), asked.lang);
         let answer = self.http.interaction(interaction.application_id);
         if let Err(error) = answer
             .create_response(interaction.id, &interaction.token, &response)
@@ -208,16 +214,136 @@ impl Bot {
             tracing::warn!("can't answer a command: {error}");
         }
     }
+
+    /// Does what `request` asks for, and returns the answer.
+    fn execute(&self, request: Request) -> Text<'static> {
+        match request {
+            Request::Answer(text) => text,
+            Request::ShowLanguage(guild) => match self.settings.language(guild) {
+                Ok(chosen) => Text::LanguageIs { chosen },
+                Err(error) => {
+                    tracing::warn!(server = %guild, "can't read the language of the server from the database: {error}");
+                    Text::StorageFailed
+                }
+            },
+            Request::SetLanguage(guild, lang) => match self.settings.set_language(guild, lang) {
+                Ok(()) => {
+                    tracing::info!(
+                        server = %guild,
+                        language = lang.code(),
+                        "changed the language of the server"
+                    );
+                    Text::LanguageSet { lang }
+                }
+                Err(error) => {
+                    tracing::warn!(server = %guild, "can't save the language of the server in the database: {error}");
+                    Text::StorageFailed
+                }
+            },
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use twilight_gateway::CloseFrame;
     use twilight_model::gateway::payload::incoming::{GuildCreate, InteractionCreate};
     use twilight_model::guild::UnavailableGuild;
 
+    use puppybot_core::i18n::Lang;
+
     use super::*;
     use crate::commands::tests::{GUILD, interaction};
+    use crate::storage::{self, Storage};
+
+    /// Settings that can be neither read nor saved, e.g. on a full disk.
+    struct Broken;
+
+    impl Settings for Broken {
+        fn language(&self, _: Id<GuildMarker>) -> Result<Option<Lang>, storage::Error> {
+            Err(storage::Error::Access(redb::Error::Io(io::Error::other(
+                "disk full",
+            ))))
+        }
+
+        fn set_language(&self, _: Id<GuildMarker>, _: Lang) -> Result<(), storage::Error> {
+            Err(storage::Error::Access(redb::Error::Io(io::Error::other(
+                "disk full",
+            ))))
+        }
+    }
+
+    /// PuppyBot on the server [`GUILD`], with `settings`, and an API that fails every request,
+    /// as nothing listens on its port. The client starts its rate limiter in the runtime, as
+    /// `Discord::new` does, so this must run in one.
+    fn bot(settings: Box<dyn Settings>) -> Bot {
+        Bot {
+            http: Client::builder()
+                .token("token".to_owned())
+                .proxy("127.0.0.1:1".to_owned(), true)
+                .build(),
+            guilds: BTreeSet::from([Id::new(GUILD)]),
+            settings,
+        }
+    }
+
+    /// Runs `test` in a runtime like the program's, with a log at every level that goes
+    /// nowhere: tracing builds only the messages that a log wants, and the tests reach them all.
+    fn in_runtime(test: impl Future<Output = ()>) {
+        prepare_tls().unwrap();
+        let log = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(io::sink)
+            .finish();
+        tracing::subscriber::with_default(log, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(test);
+        });
+    }
+
+    #[test]
+    fn the_language_of_a_server() {
+        in_runtime(async {
+            let bot = bot(Box::new(Storage::in_memory()));
+            let guild = Id::new(GUILD);
+            assert_eq!(
+                bot.execute(Request::ShowLanguage(guild)),
+                Text::LanguageIs { chosen: None }
+            );
+            assert_eq!(
+                bot.execute(Request::SetLanguage(guild, Lang::De)),
+                Text::LanguageSet { lang: Lang::De }
+            );
+            assert_eq!(
+                bot.execute(Request::ShowLanguage(guild)),
+                Text::LanguageIs {
+                    chosen: Some(Lang::De)
+                }
+            );
+            assert_eq!(bot.execute(Request::Answer(Text::NotHere)), Text::NotHere);
+        });
+    }
+
+    #[test]
+    fn settings_that_fail() {
+        in_runtime(async {
+            let bot = bot(Box::new(Broken));
+            let guild = Id::new(GUILD);
+            assert_eq!(
+                bot.execute(Request::ShowLanguage(guild)),
+                Text::StorageFailed
+            );
+            assert_eq!(
+                bot.execute(Request::SetLanguage(guild, Lang::En)),
+                Text::StorageFailed
+            );
+        });
+    }
 
     #[test]
     fn errors_say_why() {
@@ -231,48 +357,36 @@ mod tests {
         );
     }
 
-    /// Each event, with an API that fails every request, as nothing listens on its port:
-    /// warnings, which the tests of the program check. They cover only the events that it
-    /// wants, as twilight delivers no others; this covers both.
+    /// Each event, with an API that fails every request: warnings, which the tests of the
+    /// program check. They cover only the events that it wants, as twilight delivers no others;
+    /// this covers both.
     #[test]
     fn every_event_with_an_api_that_fails() {
-        prepare_tls().unwrap();
-        // The client starts its rate limiter in the runtime, as Discord::new does.
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let bot = Bot {
-                    http: Client::builder()
-                        .token("token".to_owned())
-                        .proxy("127.0.0.1:1".to_owned(), true)
-                        .build(),
-                    guilds: BTreeSet::from([Id::new(GUILD)]),
-                };
-                let ready = serde_json::from_str(
-                    r#"{"v": 10, "session_id": "session", "resume_gateway_url": "ws://127.0.0.1:1",
-                    "shard": [0, 1], "guilds": [], "application": {"id": "2", "flags": 0},
-                    "user": {"id": "3", "username": "PuppyBot", "discriminator": "0",
-                    "avatar": null, "bot": true, "mfa_enabled": false}}"#,
-                )
-                .unwrap();
-                bot.handle(Event::Ready(ready)).await;
-                let other = UnavailableGuild {
-                    id: Id::new(GUILD + 1),
-                    unavailable: true,
-                };
-                bot.handle(Event::GuildCreate(Box::new(GuildCreate::Unavailable(
-                    other,
-                ))))
-                .await;
-                let interaction = interaction(2, "info", "de", Some(GUILD));
-                bot.handle(Event::InteractionCreate(Box::new(InteractionCreate(
-                    interaction,
-                ))))
-                .await;
-                // Not wanted, see EVENTS.
-                bot.handle(Event::Resumed).await;
-            });
+        in_runtime(async {
+            let bot = bot(Box::new(Storage::in_memory()));
+            let ready = serde_json::from_str(
+                r#"{"v": 10, "session_id": "session", "resume_gateway_url": "ws://127.0.0.1:1",
+                "shard": [0, 1], "guilds": [], "application": {"id": "2", "flags": 0},
+                "user": {"id": "3", "username": "PuppyBot", "discriminator": "0",
+                "avatar": null, "bot": true, "mfa_enabled": false}}"#,
+            )
+            .unwrap();
+            bot.handle(Event::Ready(ready)).await;
+            let other = UnavailableGuild {
+                id: Id::new(GUILD + 1),
+                unavailable: true,
+            };
+            bot.handle(Event::GuildCreate(Box::new(GuildCreate::Unavailable(
+                other,
+            ))))
+            .await;
+            let interaction = interaction(2, "info", "de", Some(GUILD));
+            bot.handle(Event::InteractionCreate(Box::new(InteractionCreate(
+                interaction,
+            ))))
+            .await;
+            // Not wanted, see EVENTS.
+            bot.handle(Event::Resumed).await;
+        });
     }
 }

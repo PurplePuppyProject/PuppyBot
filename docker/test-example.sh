@@ -2,10 +2,11 @@
 # Runs the example in docker/example with a token for the test, and checks that PuppyBot starts,
 # connects to Discord, which rejects the token, and exits with the status 1 and an error that says
 # so, without warnings and without logging the token. So it checks the image as it runs: the
-# configuration, the secret, and TLS with the CA certificates of the image. Needs the network, to
-# reach Discord. Uses the image by the name in compose.yaml, so tag the image to test like that,
-# as the release workflow does. Needs Docker Compose, and sudo to give the token file to the user
-# of the image, as the README describes.
+# configuration, the secret, the database in its volume, which PuppyBot opens before it connects,
+# and TLS with the CA certificates of the image. Needs the network, to reach Discord. Uses the
+# image by the name in compose.yaml, so tag the image to test like that, as the release workflow
+# does. Needs Docker Compose, and sudo to give the token file to the user of the image, as the
+# README describes.
 #
 # Usage: docker/test-example.sh
 set -euo pipefail

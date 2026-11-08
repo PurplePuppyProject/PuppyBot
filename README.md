@@ -6,7 +6,7 @@
 
 A Discord bot of the Purple Puppy Project, written in Rust; a Signal bot may follow.
 
-**Status: being built.** So far PuppyBot connects to Discord, works only on the servers that its [configuration](#configuration) names, and answers [`/info`](#commands), in German or English. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
+**Status: being built.** So far PuppyBot connects to Discord, works only on the servers that its [configuration](#configuration) names, answers [`/info`](#commands), in German or English, and keeps the language of each server in its database. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
 
 The project holds itself to:
 
@@ -31,8 +31,11 @@ PuppyBot registers its commands only on the servers in `guilds`, and leaves any 
 | Command | What it does |
 |---|---|
 | `/info` | Shows what PuppyBot is, which version runs, and where its code is |
+| `/settings language` | Shows the language in which PuppyBot writes to everyone on the server, or changes it with `to`: German or English, by default English. Only for people who may manage the server |
 
-PuppyBot's answers are shown only to the person who asked, and mention nobody. They are in German for people whose Discord is in German, and in English for everyone else.
+PuppyBot's answers are shown only to the person who asked, and mention nobody. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
+
+Discord shows `/settings` only to people with the permission "Manage Server" or "Administrator". The server's admins can allow it to others in the server settings (Integrations), but PuppyBot answers only those who have one of the two permissions.
 
 ## Docker
 
@@ -43,7 +46,7 @@ The bot is deployed as a Docker image, for amd64 and arm64:
   - `<version>`, e.g. `0.1.0`: a release, also a pre-release.
   - `edge`: the latest commit on `main`; `sha-<commit>`: an earlier commit.
 
-The image is based on [distroless static](https://github.com/GoogleContainerTools/distroless): the static binary, CA certificates and time zone data, but no shell, no package manager and no C library. It runs as the user `65532` without privileges, and needs no writable file system and no capabilities:
+The image is based on [distroless static](https://github.com/GoogleContainerTools/distroless): the static binary, CA certificates and time zone data, but no shell, no package manager and no C library. It runs as the user `65532` without privileges and capabilities, and writes only its database, in `/var/lib/puppybot`, which belongs in a volume, see [Docker Compose](#docker-compose). Without the database, e.g. for the version:
 
 ```sh
 docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
@@ -62,7 +65,17 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
 2. Put the IDs of your servers into `guilds` in `config.toml`, see [Setting Up the Bot on Discord](#setting-up-the-bot-on-discord).
 3. Start the bot with `docker compose up -d`. `docker compose logs` shows its log, `docker compose stop` stops it.
 
-The container runs read-only, without capabilities and without gaining privileges. Compose gives it the token as the secret `/run/secrets/discord_token`, a file, which unlike an environment variable doesn't show in `docker inspect`. CI runs the example with each change, with a token that Discord rejects: so it checks that the image gets as far as Discord, see `docker/test-example.sh`.
+The container runs read-only, without capabilities and without gaining privileges. Compose gives it the token as the secret `/run/secrets/discord_token`, a file, which unlike an environment variable doesn't show in `docker inspect`.
+
+The database is in the volume `data`, which outlives the container; `docker compose down --volumes` deletes it. A directory of the host instead of the volume must belong to the user of the image: `sudo chown 65532:65532 <directory>`. To back the database up, copy its file while the bot is stopped:
+
+```sh
+docker compose stop
+docker compose cp puppybot:/var/lib/puppybot/puppybot.redb puppybot-backup.redb
+docker compose start
+```
+
+CI runs the example with each change, with a token that Discord rejects: so it checks that the image gets as far as Discord, see `docker/test-example.sh`.
 
 ### Checking the Image
 
@@ -88,6 +101,7 @@ PuppyBot reads its settings from a [TOML](https://toml.io) file: `/etc/puppybot/
 | `[discord]` `token-file` | none, it must be given | The file with the token of the bot, e.g. a Docker secret |
 | `[discord]` `guilds` | none, it must be given | The IDs of the servers that PuppyBot works on, e.g. `[123456789012345678, 234567890123456789]`: it registers its commands only there, and leaves any other server |
 | `[discord]` `gateway-url`, `api-url` | Discord's | For tests only: a gateway (`ws://`) and an API (`http://`) on this machine, e.g. `ws://127.0.0.1:8080`. Other addresses are errors, so that a changed configuration can't send the token elsewhere. |
+| `[storage]` `path` | `/var/lib/puppybot/puppybot.redb` | The file of the database, which PuppyBot creates if it is missing. It must be on a disk of this machine, and only one PuppyBot at a time can use it. |
 | `[log]` `level` | `info` | The most detailed level that is logged: `error`, `warn`, `info`, `debug` or `trace` |
 | `[log]` `format` | `text` | `text`, a line per message, or `json`, a JSON object per line, for log collectors |
 
@@ -101,7 +115,7 @@ PuppyBot reads its settings from a [TOML](https://toml.io) file: `/etc/puppybot/
 PuppyBot runs until `SIGTERM`, which `docker stop` and service managers send, or `SIGINT`, from Ctrl+C, stops it. Then it closes the connection to Discord, and waits for Discord to close it too, for at most 5 seconds, within the 10 seconds that `docker stop` waits. If the connection breaks before, PuppyBot connects again by itself. It logs to stderr, which Docker collects. Its exit status is:
 
 - 0 when a signal stopped it, or after `--version` or `--help`;
-- 1 if it can't run, e.g. as the token file is missing or holds no valid token, as the system has no CA certificates, or as Discord closed the connection for good, e.g. with the code 4004, as it rejected the token;
+- 1 if it can't run, e.g. as the token file is missing or holds no valid token, as the system has no CA certificates, as the database can't be used, or as Discord closed the connection for good, e.g. with the code 4004, as it rejected the token;
 - 2 for a command line, a configuration file or a `RUST_LOG` that PuppyBot can't use.
 
 ## Project Layout
@@ -109,7 +123,7 @@ PuppyBot runs until `SIGTERM`, which `docker stop` and service managers send, or
 | Path | What it holds |
 |---|---|
 | `crates/puppybot-core` | The bot's logic, its parsers and its texts in German and English, without Discord, storage or I/O |
-| `crates/puppybot` | The program: its command line, configuration, secrets, logging and signals, and the connection to Discord with its commands; later storage and feeds |
+| `crates/puppybot` | The program: its command line, configuration, secrets, logging and signals, the connection to Discord with its commands, and the database; later feeds |
 | `fuzz/` | The fuzz targets, a workspace of its own, see [fuzz/README.md](fuzz/README.md) |
 | `docker/` | The Dockerfile, the script that prepares its build context, the check of its SBOMs, and the example of Docker Compose with its test |
 | `utils/` | `set-version.sh`, which prepares a release |
@@ -119,7 +133,7 @@ PuppyBot runs until `SIGTERM`, which `docker stop` and service managers send, or
 
 ### Getting Started
 
-Install Rust with [rustup](https://rustup.rs). The bot builds with the current stable Rust, and with Rust 1.89 or newer (`rust-version` in `Cargo.toml`, checked by CI).
+Install Rust with [rustup](https://rustup.rs). The bot builds with the current stable Rust, and with Rust 1.90 or newer (`rust-version` in `Cargo.toml`, checked by CI).
 The checks need some tools:
 
 ```sh

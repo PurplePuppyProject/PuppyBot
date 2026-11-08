@@ -17,6 +17,9 @@ LABEL org.opencontainers.image.title="puppybot" \
       org.opencontainers.image.licenses="GPL-3.0-only"
 # Owned by root and not writable, so the bot can't change its own program.
 COPY --chmod=0555 ${TARGETPLATFORM}/puppybot /usr/local/bin/puppybot
+# The directory of the database, empty and owned by the user of the bot. A Docker volume mounted
+# there starts with its owner, so the bot may write the volume, see the README.
+COPY --chown=65532:65532 data/ /var/lib/puppybot/
 # The user nonroot of distroless, by number, so a runtime can check that it isn't root.
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/puppybot"]

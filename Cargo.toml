@@ -9,10 +9,10 @@ resolver = "3"
 # The version of PuppyBot, which make version sets, see Releasing in the README.
 version = "0.1.0"
 edition = "2024"
-# Keep in sync with the job msrv in .github/workflows/rust-build.yml. twilight 0.18 needs 1.89.
-# Cargo picks the newest versions of dependencies that support it, so an old one would also
-# hold back fixes, e.g. of the advisory RUSTSEC-2026-0009 in time before 0.3.47.
-rust-version = "1.89"
+# Keep in sync with the job msrv in .github/workflows/rust-build.yml. redb 4.5 needs 1.90, and
+# twilight 0.18 1.89. Cargo picks the newest versions of dependencies that support it, so an old
+# one would also hold back fixes, e.g. of the advisory RUSTSEC-2026-0009 in time before 0.3.47.
+rust-version = "1.90"
 license = "GPL-3.0-only"
 repository = "https://github.com/PurplePuppyProject/PuppyBot"
 # A program, deployed as a Docker image, not libraries for crates.io.
@@ -40,6 +40,8 @@ twilight-gateway = { version = "0.18.0", default-features = false, features = ["
 twilight-http = { version = "0.18.0", default-features = false, features = ["rustls-native-roots"] }
 twilight-model = "0.18.0"
 twilight-util = { version = "0.18.0", features = ["builder"] }
+# The database: one file, in pure Rust and without dependencies.
+redb = "4.5.0"
 # For the tests: Discord on this machine, see crates/puppybot/tests/common.
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 http-body-util = "0.1.5"

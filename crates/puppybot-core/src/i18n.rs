@@ -43,11 +43,13 @@
 //! `<t:1767225600:F>`, which Discord shows in the language and time zone of each reader.
 
 /// A language of PuppyBot's texts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Lang {
     /// German.
     De,
-    /// English, also for every language that PuppyBot doesn't speak.
+    /// English, also for every language that PuppyBot doesn't speak, and of a server for which
+    /// nobody chose a language.
+    #[default]
     En,
 }
 
@@ -63,6 +65,23 @@ impl Lang {
             Some(language) if language.eq_ignore_ascii_case("de") => Self::De,
             _ => Self::En,
         }
+    }
+
+    /// The code of the language, as PuppyBot stores it and as the choices of its commands hold
+    /// it: `de` or `en`.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::De => "de",
+            Self::En => "en",
+        }
+    }
+
+    /// The language whose [`Self::code`] is `code`, and none for any other text, e.g. `DE` or
+    /// `de-AT`.
+    #[must_use]
+    pub fn from_code(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|lang| lang.code() == code)
     }
 }
 
@@ -90,5 +109,18 @@ mod tests {
     #[test]
     fn all_languages() {
         assert_eq!(Lang::ALL, [Lang::De, Lang::En]);
+        assert_eq!(Lang::default(), Lang::En);
+    }
+
+    #[test]
+    fn codes() {
+        for lang in Lang::ALL {
+            assert_eq!(Lang::from_code(lang.code()), Some(lang));
+        }
+        assert_eq!(Lang::De.code(), "de");
+        assert_eq!(Lang::En.code(), "en");
+        for code in ["", "DE", "de-AT", "deu", "en-US", "fr", " de"] {
+            assert_eq!(Lang::from_code(code), None, "{code:?}");
+        }
     }
 }

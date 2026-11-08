@@ -1,27 +1,40 @@
-//! The slash commands of PuppyBot on Discord, and its answers to them. The texts are typed texts
-//! of `puppybot-core`, in German and English.
+//! The slash commands of PuppyBot on Discord: their definitions, what an interaction asks for,
+//! and the answers. The texts are typed texts of `puppybot-core`, in German and English.
 
 use std::collections::BTreeSet;
 
 use puppybot_core::i18n::Lang;
 use puppybot_core::text::Text;
 use twilight_model::application::command::{Command, CommandType};
+use twilight_model::application::interaction::application_command::{
+    CommandData, CommandDataOption, CommandOptionValue,
+};
 use twilight_model::application::interaction::{
     Interaction, InteractionContextType, InteractionData, InteractionType,
 };
 use twilight_model::channel::message::{AllowedMentions, MessageFlags};
+use twilight_model::guild::Permissions;
 use twilight_model::http::interaction::InteractionResponse;
 use twilight_model::id::Id;
 use twilight_model::id::marker::GuildMarker;
-use twilight_util::builder::command::CommandBuilder;
+use twilight_util::builder::command::{CommandBuilder, StringBuilder, SubCommandBuilder};
 use twilight_util::builder::interaction_response::ChannelMessageBuilder;
 
 /// Discord's locale of the German texts. The English ones are the defaults.
 const GERMAN: &str = "de";
 
+/// Who may use /settings: people who may manage the server. Discord shows the command only to
+/// them, unless the server's admins allow it to others, and PuppyBot checks it again.
+const MAY_CHANGE_SETTINGS: Permissions = Permissions::MANAGE_GUILD;
+
 /// The slash commands of PuppyBot, for each of its servers.
 #[must_use]
 pub fn commands() -> Vec<Command> {
+    let to = StringBuilder::new("to", Text::LanguageToDescription.render(Lang::En))
+        .description_localizations([(GERMAN, Text::LanguageToDescription.render(Lang::De))]);
+    let language = SubCommandBuilder::new("language", Text::LanguageDescription.render(Lang::En))
+        .description_localizations([(GERMAN, Text::LanguageDescription.render(Lang::De))])
+        .option(languages(to));
     vec![
         CommandBuilder::new(
             "info",
@@ -31,52 +44,147 @@ pub fn commands() -> Vec<Command> {
         .description_localizations([(GERMAN, Text::InfoDescription.render(Lang::De))])
         .contexts([InteractionContextType::Guild])
         .build(),
+        CommandBuilder::new(
+            "settings",
+            Text::SettingsDescription.render(Lang::En),
+            CommandType::ChatInput,
+        )
+        .description_localizations([(GERMAN, Text::SettingsDescription.render(Lang::De))])
+        .contexts([InteractionContextType::Guild])
+        .default_member_permissions(MAY_CHANGE_SETTINGS)
+        .option(language)
+        .build(),
     ]
 }
 
-/// The answer to `interaction` if it is a slash command, on one of `guilds` or not: only the
-/// person who asked sees it, in their language, and it mentions nobody.
+/// `option` with a choice for each language: its [`Lang::code`], named in English and German.
+fn languages(option: StringBuilder) -> StringBuilder {
+    let name = |lang, of| Text::LanguageName { lang }.render(of);
+    let choices = Lang::ALL.map(|lang| (name(lang, Lang::En), lang.code()));
+    Lang::ALL
+        .into_iter()
+        .fold(option.choices(choices), |option, lang| {
+            option.choice_localizations(&name(lang, Lang::En), [(GERMAN, name(lang, Lang::De))])
+        })
+}
+
+/// What an interaction asks PuppyBot for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    /// An answer with this text.
+    Answer(Text<'static>),
+    /// The language of the server: /settings language without `to`.
+    ShowLanguage(Id<GuildMarker>),
+    /// A new language for the server: /settings language with `to`.
+    SetLanguage(Id<GuildMarker>, Lang),
+}
+
+/// A slash command: what it asks for, and the language of the person who asked, in which the
+/// answer is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Asked {
+    /// What it asks for.
+    pub request: Request,
+    /// The language of the answer.
+    pub lang: Lang,
+}
+
+/// What `interaction` asks for if it is a slash command, on one of `guilds` or not.
 #[must_use]
-pub fn answer(
-    interaction: &Interaction,
-    guilds: &BTreeSet<Id<GuildMarker>>,
-) -> Option<InteractionResponse> {
+pub fn request(interaction: &Interaction, guilds: &BTreeSet<Id<GuildMarker>>) -> Option<Asked> {
     let Some(InteractionData::ApplicationCommand(command)) = &interaction.data else {
         return None;
     };
     if interaction.kind != InteractionType::ApplicationCommand {
         return None;
     }
-    let text = if !interaction
-        .guild_id
-        .is_some_and(|guild| guilds.contains(&guild))
-    {
-        Text::NotHere
-    } else if command.name == "info" {
-        Text::Info {
-            version: crate::VERSION,
-        }
-    } else {
-        Text::UnknownCommand
+    let request = match interaction.guild_id {
+        Some(guild) if guilds.contains(&guild) => match command.name.as_str() {
+            "info" => Request::Answer(Text::Info {
+                version: crate::VERSION,
+            }),
+            "settings" if may_change_settings(interaction) => settings(command, guild),
+            "settings" => Request::Answer(Text::NotAllowed),
+            _ => Request::Answer(Text::UnknownCommand),
+        },
+        _ => Request::Answer(Text::NotHere),
     };
     let lang = Lang::from_locale(interaction.locale.as_deref().unwrap_or_default());
-    Some(
-        ChannelMessageBuilder::new()
-            .content(text.render(lang))
-            .flags(MessageFlags::EPHEMERAL)
-            .allowed_mentions(AllowedMentions::default())
-            .build(),
-    )
+    Some(Asked { request, lang })
+}
+
+/// Whether the person who sent `interaction` may manage its server, as Discord says, also
+/// through the permission Administrator.
+fn may_change_settings(interaction: &Interaction) -> bool {
+    interaction
+        .member
+        .as_ref()
+        .and_then(|member| member.permissions)
+        .is_some_and(|permissions| {
+            permissions.intersects(MAY_CHANGE_SETTINGS | Permissions::ADMINISTRATOR)
+        })
+}
+
+/// /settings on `guild`: its subcommand language, with the option `to` or without. Any other
+/// shape is of another version of the command.
+fn settings(command: &CommandData, guild: Id<GuildMarker>) -> Request {
+    let unknown = Request::Answer(Text::UnknownCommand);
+    match command.options.as_slice() {
+        [
+            CommandDataOption {
+                name,
+                value: CommandOptionValue::SubCommand(options),
+            },
+        ] if name == "language" => match options.as_slice() {
+            [] => Request::ShowLanguage(guild),
+            [
+                CommandDataOption {
+                    name,
+                    value: CommandOptionValue::String(code),
+                },
+            ] if name == "to" => {
+                Lang::from_code(code).map_or(unknown, |lang| Request::SetLanguage(guild, lang))
+            }
+            _ => unknown,
+        },
+        _ => unknown,
+    }
+}
+
+/// The answer with `text` in `lang`: only the person who asked sees it, and it mentions nobody.
+#[must_use]
+pub fn response(text: &Text<'_>, lang: Lang) -> InteractionResponse {
+    ChannelMessageBuilder::new()
+        .content(text.render(lang))
+        .flags(MessageFlags::EPHEMERAL)
+        .allowed_mentions(AllowedMentions::default())
+        .build()
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use twilight_model::application::command::{
+        CommandOptionChoice, CommandOptionChoiceValue, CommandOptionType,
+    };
     use twilight_model::http::interaction::InteractionResponseType;
 
     use super::*;
 
     /// The server of the tests.
     pub(crate) const GUILD: u64 = 1_100_000_000_000_000_001;
+
+    /// The permission "Manage Server", as Discord sends permissions: a number.
+    pub(crate) const MANAGE_GUILD: u64 = 1 << 5;
+
+    /// The JSON of the options of /settings language to `code`.
+    pub(crate) fn language_to(code: &str) -> String {
+        format!(
+            r#"[{{"name": "language", "type": 1, "options": [{{"name": "to", "type": 3, "value": "{code}"}}]}}]"#
+        )
+    }
+
+    /// The JSON of the options of /settings language without `to`.
+    pub(crate) const LANGUAGE: &str = r#"[{"name": "language", "type": 1, "options": []}]"#;
 
     /// An interaction as Discord sends it: the slash command `name` of the type `kind`, by
     /// someone with the locale `locale`, on the server `guild` (none for a direct message).
@@ -105,43 +213,61 @@ pub(crate) mod tests {
         .unwrap()
     }
 
+    /// /settings with the options `options`, as JSON, on the server [`GUILD`], by someone with
+    /// the locale `locale` and the permissions `permissions`.
+    pub(crate) fn settings(options: &str, locale: &str, permissions: u64) -> Interaction {
+        serde_json::from_str(&format!(
+            r#"{{
+                "id": "1200000000000000001",
+                "application_id": "1200000000000000002",
+                "type": 2,
+                "token": "interaction-token",
+                "version": 1,
+                "locale": "{locale}",
+                "attachment_size_limit": 26214400,
+                "authorizing_integration_owners": {{}},
+                "entitlements": [],
+                "guild_id": "{GUILD}",
+                "member": {{
+                    "deaf": false, "mute": false, "flags": 0, "roles": [], "joined_at": null,
+                    "permissions": "{permissions}",
+                    "user": {{"id": "1400000000000000005", "username": "puppy",
+                        "discriminator": "0", "avatar": null}}
+                }},
+                "data": {{"id": "1200000000000000004", "name": "settings", "type": 1,
+                    "options": {options}}}
+            }}"#
+        ))
+        .unwrap()
+    }
+
     fn guilds() -> BTreeSet<Id<GuildMarker>> {
         BTreeSet::from([Id::new(GUILD)])
     }
 
-    /// The text of `response`, and whether it is ephemeral and mentions nobody.
-    fn content(response: &InteractionResponse) -> &str {
-        assert_eq!(
-            response.kind,
-            InteractionResponseType::ChannelMessageWithSource
-        );
-        let data = response.data.as_ref().unwrap();
-        assert_eq!(data.flags, Some(MessageFlags::EPHEMERAL));
-        assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
-        data.content.as_deref().unwrap()
+    /// What `interaction` asks for, in which language.
+    fn asked(interaction: &Interaction) -> (Request, Lang) {
+        let asked = request(interaction, &guilds()).unwrap();
+        (asked.request, asked.lang)
     }
 
     #[test]
     fn info_in_the_language_of_the_person() {
-        let version = crate::VERSION;
-        for (locale, text) in [
-            ("de", format!("PuppyBot {version}, ein Discord-Bot")),
-            ("en-US", format!("PuppyBot {version}, a Discord bot")),
-            ("fr", format!("PuppyBot {version}, a Discord bot")),
-        ] {
+        let info = Request::Answer(Text::Info {
+            version: crate::VERSION,
+        });
+        for (locale, lang) in [("de", Lang::De), ("en-US", Lang::En), ("fr", Lang::En)] {
             let interaction = interaction(2, "info", locale, Some(GUILD));
-            let response = answer(&interaction, &guilds()).unwrap();
-            assert!(content(&response).starts_with(&text), "{locale}");
+            assert_eq!(asked(&interaction), (info, lang), "{locale}");
         }
     }
 
     #[test]
     fn commands_it_does_not_know() {
         let interaction = interaction(2, "dance", "en-GB", Some(GUILD));
-        let response = answer(&interaction, &guilds()).unwrap();
         assert_eq!(
-            content(&response),
-            "PuppyBot doesn't know this command (any more)."
+            asked(&interaction),
+            (Request::Answer(Text::UnknownCommand), Lang::En)
         );
     }
 
@@ -149,10 +275,9 @@ pub(crate) mod tests {
     fn commands_outside_its_servers() {
         for guild in [Some(GUILD + 1), None] {
             let interaction = interaction(2, "info", "de", guild);
-            let response = answer(&interaction, &guilds()).unwrap();
             assert_eq!(
-                content(&response),
-                "PuppyBot arbeitet nur auf seinen Servern."
+                asked(&interaction),
+                (Request::Answer(Text::NotHere), Lang::De)
             );
         }
     }
@@ -161,10 +286,78 @@ pub(crate) mod tests {
     fn no_answer_but_to_slash_commands() {
         // Autocomplete has the data of a command, but isn't one.
         let autocomplete = interaction(4, "info", "de", Some(GUILD));
-        assert_eq!(answer(&autocomplete, &guilds()), None);
+        assert_eq!(request(&autocomplete, &guilds()), None);
         let mut without_data = interaction(2, "info", "de", Some(GUILD));
         without_data.data = None;
-        assert_eq!(answer(&without_data, &guilds()), None);
+        assert_eq!(request(&without_data, &guilds()), None);
+    }
+
+    #[test]
+    fn the_language_of_the_server() {
+        let guild = Id::new(GUILD);
+        assert_eq!(
+            asked(&settings(LANGUAGE, "de", MANAGE_GUILD)),
+            (Request::ShowLanguage(guild), Lang::De)
+        );
+        for (code, lang) in [("de", Lang::De), ("en", Lang::En)] {
+            assert_eq!(
+                asked(&settings(&language_to(code), "en-US", MANAGE_GUILD)),
+                (Request::SetLanguage(guild, lang), Lang::En)
+            );
+        }
+        // Administrators may, too, also without the permission Manage Server.
+        let administrator = 1 << 3;
+        assert_eq!(
+            asked(&settings(LANGUAGE, "de", administrator)).0,
+            Request::ShowLanguage(guild)
+        );
+    }
+
+    #[test]
+    fn settings_only_for_people_who_may_manage_the_server() {
+        let send_messages = 1 << 11;
+        for permissions in [0, send_messages] {
+            assert_eq!(
+                asked(&settings(&language_to("de"), "de", permissions)),
+                (Request::Answer(Text::NotAllowed), Lang::De)
+            );
+        }
+        let mut without_member = settings(LANGUAGE, "de", MANAGE_GUILD);
+        without_member.member = None;
+        assert_eq!(asked(&without_member).0, Request::Answer(Text::NotAllowed));
+    }
+
+    #[test]
+    fn settings_of_other_versions() {
+        for options in [
+            "[]".to_owned(),
+            r#"[{"name": "prefix", "type": 1, "options": []}]"#.to_owned(),
+            language_to("tlh"),
+            r#"[{"name": "language", "type": 1, "options": [{"name": "from", "type": 3, "value": "de"}]}]"#.to_owned(),
+            r#"[{"name": "language", "type": 1, "options": [{"name": "to", "type": 4, "value": 1}]}]"#.to_owned(),
+        ] {
+            assert_eq!(
+                asked(&settings(&options, "de", MANAGE_GUILD)).0,
+                Request::Answer(Text::UnknownCommand),
+                "{options}"
+            );
+        }
+    }
+
+    #[test]
+    fn answers_only_for_the_person_who_asked() {
+        let response = response(&Text::NotHere, Lang::En);
+        assert_eq!(
+            response.kind,
+            InteractionResponseType::ChannelMessageWithSource
+        );
+        let data = response.data.unwrap();
+        assert_eq!(data.flags, Some(MessageFlags::EPHEMERAL));
+        assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
+        assert_eq!(
+            data.content.as_deref(),
+            Some("PuppyBot works only on its servers.")
+        );
     }
 
     #[test]
@@ -174,16 +367,47 @@ pub(crate) mod tests {
             .iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, ["info"]);
-        let info = &commands[0];
+        assert_eq!(names, ["info", "settings"]);
+        for command in &commands {
+            let german = &command.description_localizations.as_ref().unwrap()["de"];
+            assert_ne!(&command.description, german);
+            assert_eq!(command.contexts, Some(vec![InteractionContextType::Guild]));
+        }
+        let (info, settings) = (&commands[0], &commands[1]);
         assert_eq!(
             info.description,
             "Shows what PuppyBot is and which version runs"
         );
+        assert_eq!(info.default_member_permissions, None);
         assert_eq!(
-            info.description_localizations.as_ref().unwrap()["de"],
-            "Zeigt, was PuppyBot ist und welche Version läuft"
+            settings.default_member_permissions,
+            Some(Permissions::MANAGE_GUILD)
         );
-        assert_eq!(info.contexts, Some(vec![InteractionContextType::Guild]));
+
+        assert_eq!(settings.options.len(), 1);
+        let language = &settings.options[0];
+        assert_eq!(
+            (language.name.as_str(), language.kind),
+            ("language", CommandOptionType::SubCommand)
+        );
+        let options = language.options.as_ref().unwrap();
+        assert_eq!(options.len(), 1);
+        let to = &options[0];
+        assert_eq!(
+            (to.name.as_str(), to.kind, to.required),
+            ("to", CommandOptionType::String, None)
+        );
+        let choice = |name: &str, german: &str, code: &str| CommandOptionChoice {
+            name: name.to_owned(),
+            name_localizations: Some([("de".to_owned(), german.to_owned())].into()),
+            value: CommandOptionChoiceValue::String(code.to_owned()),
+        };
+        assert_eq!(
+            to.choices,
+            Some(vec![
+                choice("German", "Deutsch", "de"),
+                choice("English", "Englisch", "en"),
+            ])
+        );
     }
 }

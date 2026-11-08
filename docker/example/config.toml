@@ -11,6 +11,12 @@ token-file = "/run/secrets/discord_token"
 # menu of a server has "Copy Server ID". Replace this one with yours.
 guilds = [123456789012345678]
 
+# The table [storage] may be left out, for this default.
+[storage]
+# The file of the database, which PuppyBot creates if it is missing: here in the volume of
+# compose.yaml. It must be on a disk of this machine, and only one PuppyBot may use it.
+path = "/var/lib/puppybot/puppybot.redb"
+
 # The table [log] may be left out, for these defaults.
 [log]
 # The most detailed level that is logged: error, warn, info, debug or trace. The environment

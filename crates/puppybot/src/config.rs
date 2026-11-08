@@ -13,6 +13,9 @@ use crate::logging::LogConfig;
 /// How large the configuration file may be, in bytes.
 pub const MAX_SIZE: usize = 1024 * 1024;
 
+/// The database, where the Docker image has its volume, see the README.
+pub const DEFAULT_DATABASE: &str = "/var/lib/puppybot/puppybot.redb";
+
 /// The hosts that `gateway-url` and `api-url` may name: only this machine, so someone who may
 /// change the configuration but not read the token file can't send the token elsewhere.
 const LOOPBACK: [&str; 3] = ["127.0.0.1", "[::1]", "localhost"];
@@ -23,9 +26,29 @@ const LOOPBACK: [&str; 3] = ["127.0.0.1", "[::1]", "localhost"];
 pub struct Config {
     /// The table `[discord]`.
     pub discord: DiscordConfig,
+    /// The table `[storage]`, which may be left out.
+    #[serde(default)]
+    pub storage: StorageConfig,
     /// The table `[log]`, which may be left out.
     #[serde(default)]
     pub log: LogConfig,
+}
+
+/// The table `[storage]` of the configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct StorageConfig {
+    /// The file of the database, which PuppyBot creates if it is missing. After [`parse`], a
+    /// relative path in the file is relative to the directory of the configuration file.
+    pub path: PathBuf,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::from(DEFAULT_DATABASE),
+        }
+    }
 }
 
 /// The table `[discord]` of the configuration.
@@ -132,6 +155,11 @@ pub fn parse(text: &str, dir: &Path) -> Result<Config, String> {
         loopback("api-url", url, "http")?;
     }
     discord.token_file = dir.join(&discord.token_file);
+    let storage = &mut config.storage;
+    if storage.path.as_os_str().is_empty() {
+        return Err("path in [storage] is empty".to_owned());
+    }
+    storage.path = dir.join(&storage.path);
     Ok(config)
 }
 
@@ -185,6 +213,9 @@ mod tests {
                     gateway_url: None,
                     api_url: None,
                 },
+                storage: StorageConfig {
+                    path: PathBuf::from("/var/lib/puppybot/puppybot.redb"),
+                },
                 log: LogConfig {
                     level: Level::Info,
                     format: Format::Text,
@@ -202,6 +233,9 @@ guilds = [1100000000000000001, 1100000000000000002]
 gateway-url = \"ws://127.0.0.1:4000\"
 api-url = \"http://localhost:4001\"
 
+[storage]
+path = \"data/puppybot.redb\"
+
 [log]
 level = \"debug\"
 format = \"json\"
@@ -216,6 +250,11 @@ format = \"json\"
                 gateway_url: Some("ws://127.0.0.1:4000".to_owned()),
                 api_url: Some("http://localhost:4001".to_owned()),
             }
+        );
+        // A relative path is relative to the directory of the configuration file.
+        assert_eq!(
+            config.storage.path,
+            PathBuf::from("/etc/puppybot/data/puppybot.redb")
         );
         assert_eq!(
             config.log,
@@ -239,6 +278,7 @@ format = \"json\"
             (config.discord.gateway_url, config.discord.api_url),
             (None, None)
         );
+        assert_eq!(config.storage, StorageConfig::default());
         assert_eq!(config.log, LogConfig::default());
     }
 
@@ -293,7 +333,15 @@ format = \"json\"
             ),
             (
                 &format!("{DISCORD}[logs]\n"),
-                "unknown field `logs`, expected `discord` or `log`",
+                "unknown field `logs`, expected one of `discord`, `storage`, `log`",
+            ),
+            (
+                &format!("{DISCORD}[storage]\nfile = \"db\"\n"),
+                "unknown field `file`, expected `path`",
+            ),
+            (
+                &format!("{DISCORD}[storage]\npath = \"\"\n"),
+                "path in [storage] is empty",
             ),
             (
                 &format!("{DISCORD}[log]\nlevel = \"loud\"\n"),
