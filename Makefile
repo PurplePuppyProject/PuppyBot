@@ -141,13 +141,18 @@ zizmor:
 	@zizmor $(ZIZMOR_ARGS) .github/
 
 # Run each fuzz target in fuzz/ for FUZZ_SECONDS seconds, e.g. make fuzz FUZZ_SECONDS=600.
+# The inputs it finds go to fuzz/corpus/<target>; it also starts from fuzz/seeds/<target>, if
+# there is one, which it doesn't change.
 # Stops at the first failure; fuzz/README.md describes how to reproduce it.
 # Install the tools with: rustup toolchain install nightly && cargo install cargo-fuzz
 # * (This target is called by CI as well.)
 fuzz:
 	@cd fuzz && for target in $$(cargo +nightly fuzz list); do \
 		echo "Fuzzing $$target for $(FUZZ_SECONDS) seconds..."; \
-		cargo +nightly fuzz run $$target -- -max_total_time=$(FUZZ_SECONDS) -dict=puppybot.dict || exit 1; \
+		mkdir -p corpus/$$target; \
+		seeds=; if [ -d seeds/$$target ]; then seeds=seeds/$$target; fi; \
+		cargo +nightly fuzz run $$target corpus/$$target $$seeds -- \
+			-max_total_time=$(FUZZ_SECONDS) -dict=puppybot.dict || exit 1; \
 	done
 
 # Prepare a release, e.g. make version VERSION=0.1.0, see Releasing in the README.

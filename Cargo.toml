@@ -9,8 +9,10 @@ resolver = "3"
 # The version of PuppyBot, which make version sets, see Releasing in the README.
 version = "0.1.0"
 edition = "2024"
-# Keep in sync with the job msrv in .github/workflows/rust-build.yml.
-rust-version = "1.85"
+# Keep in sync with the job msrv in .github/workflows/rust-build.yml. twilight 0.18 needs 1.89.
+# Cargo picks the newest versions of dependencies that support it, so an old one would also
+# hold back fixes, e.g. of the advisory RUSTSEC-2026-0009 in time before 0.3.47.
+rust-version = "1.89"
 license = "GPL-3.0-only"
 repository = "https://github.com/PurplePuppyProject/PuppyBot"
 # A program, deployed as a Docker image, not libraries for crates.io.
@@ -22,12 +24,28 @@ puppybot-core = { path = "crates/puppybot-core" }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 tempfile = "3.27.0"
-tokio = { version = "1.54.1", features = ["macros", "rt", "signal"] }
+tokio = { version = "1.54.1", features = ["macros", "rt", "signal", "time"] }
 # Without the feature unbounded: the parser limits how deeply tables and arrays may nest.
 toml = { version = "1.2.1", default-features = false, features = ["parse", "serde", "std"] }
 # Without the macro #[instrument], whose async functions code coverage can't see into.
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "env-filter", "fmt", "json", "std", "tracing-log"] }
+# TLS with ring as its cryptography, see deny.toml. Only TLS 1.3, which Discord speaks.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+# The CA certificates of the system, as twilight loads them.
+rustls-native-certs = "0.8.5"
+serde_json = "1.0.154"
+# Discord: one shard, the CA certificates of the system, no compression of the gateway.
+twilight-gateway = { version = "0.18.0", default-features = false, features = ["rustls-native-roots"] }
+twilight-http = { version = "0.18.0", default-features = false, features = ["rustls-native-roots"] }
+twilight-model = "0.18.0"
+twilight-util = { version = "0.18.0", features = ["builder"] }
+# For the tests: Discord on this machine, see crates/puppybot/tests/common.
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+tokio-websockets = { version = "0.13.3", default-features = false, features = ["server", "sha1_smol"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

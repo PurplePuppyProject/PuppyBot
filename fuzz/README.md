@@ -1,13 +1,14 @@
 # Fuzzing
 
-The fuzz targets feed random input to the code that reads what PuppyBot gets from outside: so far the command line of the program, the configuration file and the files with secrets.
+The fuzz targets feed random input to the code that reads what PuppyBot gets from outside: so far the command line of the program, the configuration file, the files with secrets and the interactions that Discord sends, e.g. slash commands.
 Every parser of input from users, Discord or the configuration gets a target of its own.
 They run with [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) and libFuzzer.
 
 | Target | Input | Checks beyond not crashing |
 |---|---|---|
 | `cli_args` | The command line, as arguments separated by NUL bytes | The command line of what the parser understood is understood the same, and the program prints the version or the help with the exit status 0, or an error with 2. It doesn't run the bot, which would read the files that the input names. |
-| `config` | The configuration file, as its text | An accepted configuration names a token file, at an absolute path, as the directory of the configuration file is. |
+| `config` | The configuration file, as its text | An accepted configuration names a token file, at an absolute path, as the directory of the configuration file is, and at least one server. |
+| `interaction` | An interaction, as JSON from Discord's gateway | An answer is a message that only the person who asked sees, mentions nobody, and fits into Discord's limit of 2000 characters. |
 | `token_file` | What a file with a secret holds | The secret is printable ASCII and the start of the input, and only line breaks follow it. |
 
 ## Running
@@ -35,6 +36,12 @@ cargo +nightly fuzz run cli_args -- -dict=puppybot.dict
 
 [`puppybot.dict`](puppybot.dict) holds tokens of the input, e.g. the options of the command line, which help libFuzzer find valid input.
 The inputs it found go to `corpus/<target>`, and are used again in the next run.
+`make fuzz` also starts a target from the inputs in `seeds/<target>`, if there are any, which it only reads: whole inputs that libFuzzer wouldn't find by itself, e.g. the interactions in [`seeds/interaction`](seeds/interaction), which twilight reads only with all the fields that Discord sends.
+To run a target with them by hand, name both directories:
+
+```sh
+cargo +nightly fuzz run interaction corpus/interaction seeds/interaction -- -dict=puppybot.dict
+```
 
 ## When a Target Fails
 
@@ -58,3 +65,4 @@ cargo +nightly fuzz run cli_args artifacts/cli_args/crash-<hash>
 1. Add a function to the crate's `src/fuzz.rs` that feeds its input to the parser and checks what it can, with a smoke test. A crate without one yet gets the module like `crates/puppybot`: `#[cfg(all(unix, any(test, fuzzing)))] pub mod fuzz;`, and becomes a dependency in `Cargo.toml`.
 2. Add `fuzz_targets/<target>.rs`, which calls it, like the others.
 3. Add a `[[bin]]` section for it to `Cargo.toml`.
+4. If libFuzzer can't find valid input by itself, e.g. JSON with many fields, add some to `seeds/<target>/`, and a test that the parser reads each of them, like the one for `seeds/interaction`.

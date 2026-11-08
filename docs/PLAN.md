@@ -18,9 +18,9 @@ What was decided in the planning of PuppyBot on 2026-11-07, with the versions of
 
 | Area | Choice | Version on 2026-11-07 | Why |
 |---|---|---|---|
-| Discord | twilight: gateway, http, model, util, and twilight-interactions for commands | 0.18.0 | Modular, with plain data types: handlers are functions from Discord's models to answers, testable without Discord. serenity 0.12.5 and poise 0.7.1 are framework-heavy and face the breaking serenity 0.13. |
+| Discord | twilight: gateway, http, model, util, and twilight-interactions for commands | 0.18.0 | Modular, with plain data types: handlers are functions from Discord's models to answers, testable without Discord. serenity 0.12.5 and poise 0.7.1 are framework-heavy and face the breaking serenity 0.13. twilight 0.18 needs Rust 1.89, the oldest Rust that PuppyBot supports since `feature/discord_connection`. |
 | Async runtime | tokio | 1.54.1 | What twilight uses. |
-| TLS | rustls with ring as its cryptography | rustls 0.23.46, ring 0.17.14 | Less code than aws-lc-rs, the default of rustls, and a static musl build proven in vibe-portredirect. Accepted: no post-quantum key exchange, which ring lacks. The default features of rustls, and of the crates that use it, must be turned off; `deny.toml` bans aws-lc-rs. |
+| TLS | rustls with ring as its cryptography | rustls 0.23.46, ring 0.17.14 | Less code than aws-lc-rs, the default of rustls, and a static musl build proven in vibe-portredirect. Accepted: no post-quantum key exchange, which ring lacks. The default features of rustls, and of the crates that use it, must be turned off; `deny.toml` bans aws-lc-rs. The CA certificates are the system's (twilight's `rustls-native-roots`), which the image has and which its base image updates, not a list compiled into the binary. |
 | Storage | redb | 4.5.0 | Pure Rust, ACID transactions, one file in a volume, a backend in memory for tests. Queries over keys are built by hand. |
 | Secrets | Files that the configuration names, e.g. Docker or Compose secrets in `/run/secrets/` | | Not shown by `docker inspect`, `/proc/<pid>/environ` or crash reports. |
 | Configuration | A TOML file for the instance, `/etc/puppybot/config.toml` or the one `--config` names, with no settings from environment variables but `RUST_LOG`; the database for the settings of each server, changed with slash commands | serde 1.0.229, toml 1.2.1 | One place for every setting; unknown keys are errors. |
@@ -28,7 +28,15 @@ What was decided in the planning of PuppyBot on 2026-11-07, with the versions of
 | Texts | Typed texts in `puppybot-core`: an enum per area, one exhaustive `match` per language | | A missing translation doesn't compile, nothing is parsed at run time, and tests reach every text. |
 | Dates and times | Discord timestamps (`<t:…>`) | | Discord shows them in the language and time zone of each reader. |
 
-Chosen in their steps, with the versions current then: the feed parser (e.g. feed-rs 3.0.0 or quick-xml 0.42.0), the HTTP client for feeds and Twitch (with rustls and ring), and the compression of the gateway (preferably zlib-rs, which is pure Rust, instead of zstd, which is C).
+Chosen in their steps, with the versions current then: the feed parser (e.g. feed-rs 3.0.0 or quick-xml 0.42.0), and the HTTP client for feeds and Twitch (with rustls and ring).
+
+Decided in `feature/discord_connection`:
+
+- **Intents:** only `GUILDS`, which isn't privileged: slash commands need no intent. Each step asks for the intents it needs.
+- **No compression of the gateway:** with a few servers and `GUILDS`, there is little to save, and twilight's zstd is C. If it is needed later: zlib, preferably with zlib-rs, which is pure Rust.
+- **Commands:** built with twilight-util's `CommandBuilder` while they have no options; twilight-interactions 0.18.0 is decided on with the first command that has options, `/settings language`.
+- **The servers:** an allowlist in the configuration, `guilds`. The commands are registered only there, as commands of each server, which Discord updates at once, unlike global commands; PuppyBot removes its global commands, and leaves any other server.
+- **Answers:** ephemeral, so only the person who asked sees them, and without mentions, also if a text ever holds one.
 
 ## Structure
 
@@ -51,8 +59,8 @@ A Cargo workspace:
 One branch and pull request each, in this order:
 
 1. `feature/configuration`, done: the TOML configuration, secrets from files, logging, how the program starts and stops (signals, exit statuses), and an example for Docker Compose.
-2. `feature/discord_connection`: twilight's gateway with the intents needed, reconnecting, the slash commands registered with German and English names and descriptions, and a first command, e.g. `/info`.
-3. `feature/storage`: redb for the settings of each server, with a version of the stored data for later changes.
+2. `feature/discord_connection`, done: twilight's gateway with the intents needed, reconnecting, the servers of the configuration, the slash commands registered with German and English descriptions, and a first command, `/info`.
+3. `feature/storage`: redb for the settings of each server, with a version of the stored data for later changes. The first setting: the language of each server, `/settings language`, for people with "Manage Server", in German or English, for the texts that aren't addressed to one person.
 4. `feature/prefix_commands`: the platform-neutral parser of prefix commands in `puppybot-core`, with a fuzz target, and a prefix for each server.
 5. `feature/utility_commands`: dice (an expression parser with a fuzz target), polls, info commands, quotes and small games.
 6. `feature/onboarding`: welcome messages, self-roles, confirming the rules, events and reminders.

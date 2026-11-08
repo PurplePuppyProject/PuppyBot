@@ -6,6 +6,10 @@
 # The file with the token of the bot: here the secret of compose.yaml. A relative path is relative
 # to the directory of this file.
 token-file = "/run/secrets/discord_token"
+# The IDs of the servers that PuppyBot works on: only there it registers its commands, and it
+# leaves every other server. In Discord, with the developer mode on (Settings, Advanced), the
+# menu of a server has "Copy Server ID". Replace this one with yours.
+guilds = [123456789012345678]
 
 # The table [log] may be left out, for these defaults.
 [log]

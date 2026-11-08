@@ -7,3 +7,4 @@
 //! without I/O; `make lint` checks that.
 
 pub mod i18n;
+pub mod text;

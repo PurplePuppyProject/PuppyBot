@@ -1,8 +1,8 @@
 //! PuppyBot, a Discord bot of the Purple Puppy Project: the program.
 //!
-//! So far it reads its configuration and the token of the bot, logs, and runs until a signal
-//! stops it; the connection to Discord comes next. `src/main.rs` only hands over to [`run`], so
-//! the tests reach everything the program does.
+//! It reads its configuration and the token of the bot, connects to Discord, answers the slash
+//! commands on its servers, and runs until a signal stops it. `src/main.rs` only hands over to
+//! [`run`], so the tests reach everything the program does.
 
 #[cfg(not(unix))]
 compile_error!("PuppyBot runs on Linux and other Unix systems");
@@ -14,7 +14,9 @@ use std::io::Write;
 use std::path::Path;
 
 pub mod cli;
+pub mod commands;
 pub mod config;
+pub mod discord;
 pub mod files;
 #[cfg(any(test, fuzzing))]
 pub mod fuzz;
@@ -93,24 +95,24 @@ fn usage_error(err: &mut dyn Write, error: &dyn Display) -> u8 {
     EXIT_USAGE
 }
 
-/// Reads the secrets, and runs until a signal stops PuppyBot.
+/// Reads the secrets, and runs on Discord until a signal stops PuppyBot.
 fn serve(config: &config::Config, path: &Path) -> Result<shutdown::Stop, Box<dyn Error>> {
     let secrets = secret::Secrets::load(config)?;
+    discord::prepare_tls()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async move {
         // Caught before saying that PuppyBot started, which tells that it may be stopped.
         let mut signals = shutdown::Signals::new()?;
+        let discord = discord::Discord::new(&config.discord, secrets.discord_token());
+        drop(secrets);
         tracing::info!(
             version = VERSION,
             config = %path.display(),
-            "PuppyBot started; it doesn't connect to Discord yet"
+            "PuppyBot started, connecting to Discord"
         );
-        let stop = signals.recv().await;
-        // Kept until here for the connection to Discord, which comes next.
-        drop(secrets);
-        Ok(stop)
+        Ok(discord.run(&mut signals).await?)
     })
 }
 
