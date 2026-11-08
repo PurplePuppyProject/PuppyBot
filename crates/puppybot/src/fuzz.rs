@@ -10,6 +10,7 @@ use std::path::Path;
 
 use puppybot_core::i18n::Lang;
 use puppybot_core::text::Text;
+use puppybot_core::text_command;
 use secrecy::ExposeSecret;
 use twilight_model::application::interaction::Interaction;
 use twilight_model::channel::message::{AllowedMentions, MessageFlags};
@@ -94,10 +95,21 @@ pub fn interaction(data: &[u8]) {
             Text::StorageFailed,
         ],
         Request::SetLanguage(_, lang) => vec![Text::LanguageSet { lang }, Text::StorageFailed],
+        Request::ShowPrefix(_) => vec![
+            Text::PrefixIs { chosen: None },
+            Text::PrefixIs {
+                chosen: Some("pb!"),
+            },
+            Text::StorageFailed,
+        ],
+        Request::SetPrefix(_, prefix) => {
+            assert!(text_command::is_valid_prefix(prefix), "{prefix:?}");
+            vec![Text::PrefixSet { prefix }, Text::StorageFailed]
+        }
     };
     for text in answers {
         // An answer without a message has none of these.
-        let data = crate::commands::response(&text, asked.lang)
+        let data = crate::commands::response(text.render(asked.lang))
             .data
             .unwrap_or_default();
         assert_eq!(data.flags, Some(MessageFlags::EPHEMERAL), "{data:?}");
@@ -106,6 +118,35 @@ pub fn interaction(data: &[u8]) {
             data.content
                 .is_some_and(|content| content.chars().count() <= 2000)
         );
+    }
+}
+
+/// A prefix and a message, as the first line of the input and the rest.
+///
+/// Checks beyond not crashing: [`text_command::parse`] finds a command only after the prefix,
+/// if it isn't empty, or after a mention of PuppyBot, and its arguments are a part of the
+/// message without spaces around them. [`text_command::is_valid_prefix`] accepts only 1 to 5
+/// characters of ASCII that one can see.
+///
+/// # Panics
+///
+/// If a check fails, which is what the fuzz target looks for.
+pub fn text_command(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let (prefix, message) = text.split_once('\n').unwrap_or((text, ""));
+    let mentions = ["<@1234>", "<@!1234>"];
+    if let Some((command, arguments)) = text_command::parse(message, prefix, &mentions) {
+        let after_prefix = !prefix.is_empty() && message.starts_with(prefix);
+        let after_mention = mentions.iter().any(|mention| message.starts_with(mention));
+        assert!(after_prefix || after_mention, "{command:?}");
+        assert_eq!(arguments, arguments.trim());
+        assert!(message.contains(arguments));
+    }
+    if text_command::is_valid_prefix(prefix) {
+        assert!((1..=5).contains(&prefix.len()));
+        assert!(prefix.bytes().all(|byte| byte.is_ascii_graphic()));
     }
 }
 
@@ -213,6 +254,24 @@ mod tests {
             seeds += 1;
         }
         assert_ne!(seeds, 0, "no seeds in {}", dir.display());
+    }
+
+    #[test]
+    fn text_command_smoke_test() {
+        let inputs: [&[u8]; 9] = [
+            b"!\n!info",
+            b"!\n!hilfe now",
+            b"\n<@1234> info",
+            b"\n<@!1234>",
+            b"pb?\npb?help me",
+            b"",
+            b"!",
+            b"a b\n<@1234>",
+            b"\xff\n!info",
+        ];
+        for input in inputs {
+            super::text_command(input);
+        }
     }
 
     #[test]

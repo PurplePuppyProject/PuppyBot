@@ -1,6 +1,7 @@
 //! The texts of PuppyBot that users see, each in German and English, see [`crate::i18n`].
 
 use crate::i18n::Lang;
+use crate::text_command::DEFAULT_PREFIX;
 
 /// Where the code of PuppyBot is, from `Cargo.toml`.
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
@@ -45,12 +46,33 @@ pub enum Text<'a> {
     NotAllowed,
     /// The answer when PuppyBot can't read or save its settings, e.g. as the disk is full.
     StorageFailed,
+    /// The description of /settings prefix.
+    PrefixDescription,
+    /// The description of the option `to` of /settings prefix.
+    PrefixToDescription,
+    /// The answer to /settings prefix without `to`: how text commands start on the server.
+    PrefixIs {
+        /// The prefix chosen for the server, none if nobody chose one yet.
+        chosen: Option<&'a str>,
+    },
+    /// The answer to /settings prefix with `to`.
+    PrefixSet {
+        /// The new prefix of the server.
+        prefix: &'a str,
+    },
+    /// The answer to /settings prefix with a prefix that PuppyBot doesn't take.
+    PrefixInvalid,
+    /// The answer to the text command help: the commands.
+    Help {
+        /// The prefix of the server.
+        prefix: &'a str,
+    },
 }
 
 impl Text<'_> {
     /// All texts, with an example for each value they hold, e.g. for tests that each exists in
     /// every language.
-    pub const ALL: [Text<'static>; 15] = [
+    pub const ALL: [Text<'static>; 22] = [
         Text::InfoDescription,
         Text::Info { version: "1.2.3" },
         Text::UnknownCommand,
@@ -70,14 +92,23 @@ impl Text<'_> {
         Text::LanguageSet { lang: Lang::De },
         Text::NotAllowed,
         Text::StorageFailed,
+        Text::PrefixDescription,
+        Text::PrefixToDescription,
+        Text::PrefixIs { chosen: None },
+        Text::PrefixIs { chosen: Some("?") },
+        Text::PrefixSet { prefix: "pb!" },
+        Text::PrefixInvalid,
+        Text::Help { prefix: "!" },
     ];
 
     /// The descriptions in the list of commands, which Discord limits to 100 characters.
-    pub const DESCRIPTIONS: [Text<'static>; 4] = [
+    pub const DESCRIPTIONS: [Text<'static>; 6] = [
         Text::InfoDescription,
         Text::SettingsDescription,
         Text::LanguageDescription,
         Text::LanguageToDescription,
+        Text::PrefixDescription,
+        Text::PrefixToDescription,
     ];
 
     /// The text in `lang`.
@@ -134,6 +165,35 @@ impl Text<'_> {
                 "PuppyBot kommt gerade nicht an seine Einstellungen. Bitte später noch einmal versuchen."
                     .to_owned()
             }
+            Self::PrefixDescription => {
+                "Zeigt oder ändert, womit die Textbefehle von PuppyBot hier beginnen, z. B. ! für !info"
+                    .to_owned()
+            }
+            Self::PrefixToDescription => {
+                "Das neue Präfix: 1 bis 5 Zeichen, z. B. ? oder pb!; ohne es zeigt PuppyBot das jetzige"
+                    .to_owned()
+            }
+            Self::PrefixIs {
+                chosen: Some(prefix),
+            } => format!(
+                "Auf diesem Server beginnen die Textbefehle von PuppyBot mit `{prefix}`, z. B. `{prefix}info`, oder mit einer Erwähnung von PuppyBot."
+            ),
+            Self::PrefixIs { chosen: None } => format!(
+                "Auf diesem Server beginnen die Textbefehle von PuppyBot mit `{DEFAULT_PREFIX}`, z. B. `{DEFAULT_PREFIX}info`, da noch niemand ein Präfix gewählt hat, oder mit einer Erwähnung von PuppyBot."
+            ),
+            Self::PrefixSet { prefix } => format!(
+                "Ab jetzt beginnen die Textbefehle von PuppyBot auf diesem Server mit `{prefix}`, z. B. `{prefix}info`."
+            ),
+            Self::PrefixInvalid => {
+                "Ein Präfix hat 1 bis 5 sichtbare ASCII-Zeichen, z. B. `!` oder `pb?`, aber keine Leerzeichen, keins von < > @ # : / und keine Backticks."
+                    .to_owned()
+            }
+            Self::Help { prefix } => format!(
+                "Die Textbefehle von PuppyBot beginnen hier mit `{prefix}` oder mit einer Erwähnung von PuppyBot:\n\
+                 - `{prefix}info`: was PuppyBot ist und welche Version läuft\n\
+                 - `{prefix}hilfe`: diese Befehle\n\
+                 Seine Slash-Befehle, z. B. `/info`, stehen in Discords Liste der Befehle."
+            ),
         }
     }
 
@@ -178,6 +238,34 @@ impl Text<'_> {
             Self::StorageFailed => {
                 "PuppyBot can't get at its settings right now. Please try again later.".to_owned()
             }
+            Self::PrefixDescription => {
+                "Shows or changes how PuppyBot's text commands start here, e.g. ! for !info".to_owned()
+            }
+            Self::PrefixToDescription => {
+                "The new prefix: 1 to 5 characters, e.g. ? or pb!; without it, PuppyBot shows the current one"
+                    .to_owned()
+            }
+            Self::PrefixIs {
+                chosen: Some(prefix),
+            } => format!(
+                "On this server, PuppyBot's text commands start with `{prefix}`, e.g. `{prefix}info`, or with a mention of PuppyBot."
+            ),
+            Self::PrefixIs { chosen: None } => format!(
+                "On this server, PuppyBot's text commands start with `{DEFAULT_PREFIX}`, e.g. `{DEFAULT_PREFIX}info`, as nobody chose a prefix yet, or with a mention of PuppyBot."
+            ),
+            Self::PrefixSet { prefix } => format!(
+                "From now on, PuppyBot's text commands start with `{prefix}` on this server, e.g. `{prefix}info`."
+            ),
+            Self::PrefixInvalid => {
+                "A prefix has 1 to 5 visible ASCII characters, e.g. `!` or `pb?`, but no spaces, none of < > @ # : / and no backticks."
+                    .to_owned()
+            }
+            Self::Help { prefix } => format!(
+                "PuppyBot's text commands start with `{prefix}` here, or with a mention of PuppyBot:\n\
+                 - `{prefix}info`: what PuppyBot is, and which version runs\n\
+                 - `{prefix}help`: these commands\n\
+                 Its slash commands, e.g. `/info`, are in Discord's list of commands."
+            ),
         }
     }
 }
@@ -192,8 +280,10 @@ mod tests {
             let texts = Lang::ALL.map(|lang| text.render(lang));
             for rendered in &texts {
                 assert!(!rendered.is_empty(), "{text:?}");
-                // No mentions, which would ping someone.
-                assert!(!rendered.contains('@'), "{text:?}: {rendered}");
+                // No mentions, which would ping someone, though the answers allow none.
+                for mention in ["@everyone", "@here", "<@"] {
+                    assert!(!rendered.contains(mention), "{text:?}: {rendered}");
+                }
             }
             assert_ne!(texts[0], texts[1], "{text:?} isn't translated");
         }
@@ -207,6 +297,30 @@ mod tests {
                 assert!(description.chars().count() <= 100, "{description}");
             }
         }
+    }
+
+    #[test]
+    fn the_help_and_the_prefix() {
+        let help = Text::Help { prefix: "?" };
+        assert_eq!(
+            help.render(Lang::En),
+            "PuppyBot's text commands start with `?` here, or with a mention of PuppyBot:\n\
+             - `?info`: what PuppyBot is, and which version runs\n\
+             - `?help`: these commands\n\
+             Its slash commands, e.g. `/info`, are in Discord's list of commands."
+        );
+        assert!(
+            help.render(Lang::De)
+                .contains("\n- `?hilfe`: diese Befehle\n")
+        );
+        assert_eq!(
+            Text::PrefixIs { chosen: None }.render(Lang::En),
+            "On this server, PuppyBot's text commands start with `!`, e.g. `!info`, as nobody chose a prefix yet, or with a mention of PuppyBot."
+        );
+        assert_eq!(
+            Text::PrefixSet { prefix: "pb!" }.render(Lang::De),
+            "Ab jetzt beginnen die Textbefehle von PuppyBot auf diesem Server mit `pb!`, z. B. `pb!info`."
+        );
     }
 
     #[test]

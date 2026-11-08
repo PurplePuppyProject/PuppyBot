@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use puppybot_core::i18n::Lang;
 use puppybot_core::text::Text;
+use puppybot_core::text_command;
 use twilight_model::application::command::{Command, CommandType};
 use twilight_model::application::interaction::application_command::{
     CommandData, CommandDataOption, CommandOptionValue,
@@ -35,6 +36,13 @@ pub fn commands() -> Vec<Command> {
     let language = SubCommandBuilder::new("language", Text::LanguageDescription.render(Lang::En))
         .description_localizations([(GERMAN, Text::LanguageDescription.render(Lang::De))])
         .option(languages(to));
+    let to = StringBuilder::new("to", Text::PrefixToDescription.render(Lang::En))
+        .description_localizations([(GERMAN, Text::PrefixToDescription.render(Lang::De))])
+        .min_length(1)
+        .max_length(u16::from(text_command::MAX_PREFIX));
+    let prefix = SubCommandBuilder::new("prefix", Text::PrefixDescription.render(Lang::En))
+        .description_localizations([(GERMAN, Text::PrefixDescription.render(Lang::De))])
+        .option(to);
     vec![
         CommandBuilder::new(
             "info",
@@ -53,6 +61,7 @@ pub fn commands() -> Vec<Command> {
         .contexts([InteractionContextType::Guild])
         .default_member_permissions(MAY_CHANGE_SETTINGS)
         .option(language)
+        .option(prefix)
         .build(),
     ]
 }
@@ -70,28 +79,36 @@ fn languages(option: StringBuilder) -> StringBuilder {
 
 /// What an interaction asks PuppyBot for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Request {
+pub enum Request<'a> {
     /// An answer with this text.
     Answer(Text<'static>),
     /// The language of the server: /settings language without `to`.
     ShowLanguage(Id<GuildMarker>),
     /// A new language for the server: /settings language with `to`.
     SetLanguage(Id<GuildMarker>, Lang),
+    /// The prefix of the server: /settings prefix without `to`.
+    ShowPrefix(Id<GuildMarker>),
+    /// A new prefix for the server, which [`text_command::is_valid_prefix`] accepts: /settings
+    /// prefix with `to`.
+    SetPrefix(Id<GuildMarker>, &'a str),
 }
 
 /// A slash command: what it asks for, and the language of the person who asked, in which the
 /// answer is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Asked {
+pub struct Asked<'a> {
     /// What it asks for.
-    pub request: Request,
+    pub request: Request<'a>,
     /// The language of the answer.
     pub lang: Lang,
 }
 
 /// What `interaction` asks for if it is a slash command, on one of `guilds` or not.
 #[must_use]
-pub fn request(interaction: &Interaction, guilds: &BTreeSet<Id<GuildMarker>>) -> Option<Asked> {
+pub fn request<'a>(
+    interaction: &'a Interaction,
+    guilds: &BTreeSet<Id<GuildMarker>>,
+) -> Option<Asked<'a>> {
     let Some(InteractionData::ApplicationCommand(command)) = &interaction.data else {
         return None;
     };
@@ -125,37 +142,48 @@ fn may_change_settings(interaction: &Interaction) -> bool {
         })
 }
 
-/// /settings on `guild`: its subcommand language, with the option `to` or without. Any other
-/// shape is of another version of the command.
-fn settings(command: &CommandData, guild: Id<GuildMarker>) -> Request {
+/// /settings on `guild`: its subcommands language and prefix, with the option `to` or without.
+/// Any other shape is of another version of the command.
+fn settings(command: &CommandData, guild: Id<GuildMarker>) -> Request<'_> {
     let unknown = Request::Answer(Text::UnknownCommand);
-    match command.options.as_slice() {
+    let [
+        CommandDataOption {
+            name,
+            value: CommandOptionValue::SubCommand(options),
+        },
+    ] = command.options.as_slice()
+    else {
+        return unknown;
+    };
+    let to = match options.as_slice() {
+        [] => None,
         [
             CommandDataOption {
                 name,
-                value: CommandOptionValue::SubCommand(options),
+                value: CommandOptionValue::String(value),
             },
-        ] if name == "language" => match options.as_slice() {
-            [] => Request::ShowLanguage(guild),
-            [
-                CommandDataOption {
-                    name,
-                    value: CommandOptionValue::String(code),
-                },
-            ] if name == "to" => {
-                Lang::from_code(code).map_or(unknown, |lang| Request::SetLanguage(guild, lang))
-            }
-            _ => unknown,
-        },
+        ] if name == "to" => Some(value.as_str()),
+        _ => return unknown,
+    };
+    match (name.as_str(), to) {
+        ("language", None) => Request::ShowLanguage(guild),
+        ("language", Some(code)) => {
+            Lang::from_code(code).map_or(unknown, |lang| Request::SetLanguage(guild, lang))
+        }
+        ("prefix", None) => Request::ShowPrefix(guild),
+        ("prefix", Some(prefix)) if text_command::is_valid_prefix(prefix) => {
+            Request::SetPrefix(guild, prefix)
+        }
+        ("prefix", Some(_)) => Request::Answer(Text::PrefixInvalid),
         _ => unknown,
     }
 }
 
-/// The answer with `text` in `lang`: only the person who asked sees it, and it mentions nobody.
+/// The answer with `content`: only the person who asked sees it, and it mentions nobody.
 #[must_use]
-pub fn response(text: &Text<'_>, lang: Lang) -> InteractionResponse {
+pub fn response(content: String) -> InteractionResponse {
     ChannelMessageBuilder::new()
-        .content(text.render(lang))
+        .content(content)
         .flags(MessageFlags::EPHEMERAL)
         .allowed_mentions(AllowedMentions::default())
         .build()
@@ -246,7 +274,7 @@ pub(crate) mod tests {
     }
 
     /// What `interaction` asks for, in which language.
-    fn asked(interaction: &Interaction) -> (Request, Lang) {
+    fn asked(interaction: &Interaction) -> (Request<'_>, Lang) {
         let asked = request(interaction, &guilds()).unwrap();
         (asked.request, asked.lang)
     }
@@ -314,6 +342,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_prefix_of_the_server() {
+        let guild = Id::new(GUILD);
+        let prefix = |to: Option<&str>| {
+            let to = to.map_or_else(String::new, |to| {
+                format!(r#"{{"name": "to", "type": 3, "value": "{to}"}}"#)
+            });
+            settings(
+                &format!(r#"[{{"name": "prefix", "type": 1, "options": [{to}]}}]"#),
+                "de",
+                MANAGE_GUILD,
+            )
+        };
+        let show = prefix(None);
+        assert_eq!(asked(&show).0, Request::ShowPrefix(guild));
+        let set = prefix(Some("pb?"));
+        assert_eq!(asked(&set).0, Request::SetPrefix(guild, "pb?"));
+        // Discord's limits of the option let these through, PuppyBot doesn't.
+        for invalid in ["a b", "<@1>", "/", "ü"] {
+            let set = prefix(Some(invalid));
+            assert_eq!(
+                asked(&set).0,
+                Request::Answer(Text::PrefixInvalid),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn settings_only_for_people_who_may_manage_the_server() {
         let send_messages = 1 << 11;
         for permissions in [0, send_messages] {
@@ -331,7 +387,8 @@ pub(crate) mod tests {
     fn settings_of_other_versions() {
         for options in [
             "[]".to_owned(),
-            r#"[{"name": "prefix", "type": 1, "options": []}]"#.to_owned(),
+            r#"[{"name": "colour", "type": 1, "options": []}]"#.to_owned(),
+            r#"[{"name": "colour", "type": 1, "options": [{"name": "to", "type": 3, "value": "red"}]}]"#.to_owned(),
             language_to("tlh"),
             r#"[{"name": "language", "type": 1, "options": [{"name": "from", "type": 3, "value": "de"}]}]"#.to_owned(),
             r#"[{"name": "language", "type": 1, "options": [{"name": "to", "type": 4, "value": 1}]}]"#.to_owned(),
@@ -346,7 +403,7 @@ pub(crate) mod tests {
 
     #[test]
     fn answers_only_for_the_person_who_asked() {
-        let response = response(&Text::NotHere, Lang::En);
+        let response = response(Text::NotHere.render(Lang::En));
         assert_eq!(
             response.kind,
             InteractionResponseType::ChannelMessageWithSource
@@ -384,8 +441,8 @@ pub(crate) mod tests {
             Some(Permissions::MANAGE_GUILD)
         );
 
-        assert_eq!(settings.options.len(), 1);
-        let language = &settings.options[0];
+        assert_eq!(settings.options.len(), 2);
+        let (language, prefix) = (&settings.options[0], &settings.options[1]);
         assert_eq!(
             (language.name.as_str(), language.kind),
             ("language", CommandOptionType::SubCommand)
@@ -409,5 +466,20 @@ pub(crate) mod tests {
                 choice("English", "Englisch", "en"),
             ])
         );
+
+        // /settings prefix, whose option Discord already limits to 1 to 5 characters.
+        assert_eq!(
+            (prefix.name.as_str(), prefix.kind),
+            ("prefix", CommandOptionType::SubCommand)
+        );
+        let options = prefix.options.as_ref().unwrap();
+        assert_eq!(options.len(), 1);
+        let to = &options[0];
+        assert_eq!(
+            (to.name.as_str(), to.min_length, to.max_length),
+            ("to", Some(1), Some(5))
+        );
+        // Any text, no choices.
+        assert!(to.choices.as_ref().is_none_or(Vec::is_empty));
     }
 }

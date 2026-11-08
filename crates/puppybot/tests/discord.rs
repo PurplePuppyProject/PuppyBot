@@ -13,13 +13,10 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use common::{
-    APPLICATION, FakeDiscord, GUILD, MANAGE_GUILD, OTHER_GUILD, Running, Send, TOKEN, config,
-    guild_create, interaction, ready, settings_language, setup,
+    APPLICATION, CHANNEL_MESSAGES, FakeDiscord, GUILD, MANAGE_GUILD, MENTION, OTHER_GUILD, Running,
+    SETTINGS_ANSWER, Send, TOKEN, config, guild_create, interaction, message, ready, settings,
+    setup,
 };
-
-/// Where PuppyBot answers /settings, see [`settings_language`].
-const SETTINGS_ANSWER: &str =
-    "POST /api/v10/interactions/1200000000000000006/settings-token/callback";
 
 /// Starts PuppyBot with `discord`.
 fn start(discord: &FakeDiscord) -> (tempfile::TempDir, Running) {
@@ -45,14 +42,14 @@ fn registers_the_commands_leaves_other_servers_and_answers() {
     );
     let (_dir, mut bot) = start(&discord);
 
-    // It identifies with the token and only the intent GUILDS.
+    // It identifies with the token, and the intents GUILDS, GUILD_MESSAGES and MESSAGE_CONTENT.
     bot.wait_for("registered the commands");
     let identify = &discord.received()[0];
     assert!(
         identify.contains(&format!(r#""token":"Bot {TOKEN}""#)),
         "{identify}"
     );
-    assert!(identify.contains(r#""intents":1,"#), "{identify}");
+    assert!(identify.contains(r#""intents":33281,"#), "{identify}");
 
     // No global commands, and the commands on its server, in English and German.
     let global =
@@ -142,12 +139,14 @@ fn failing_requests_are_warnings() {
                 ready(url),
                 guild_create(OTHER_GUILD),
                 interaction(2, "info", "en-US", GUILD),
+                message(1, "!info", GUILD, false),
             ]
         },
         Some(400),
     );
     let (_dir, mut bot) = start(&discord);
-    bot.wait_for("can't answer a command");
+    // The last of the script.
+    bot.wait_for("can't answer a text command");
     let (status, log) = bot.stop_with("TERM");
     assert_eq!(status, Some(0), "{log}");
     for warning in [
@@ -155,6 +154,7 @@ fn failing_requests_are_warnings() {
         "can't register the commands",
         "can't leave the server",
         "can't answer a command",
+        "can't answer a text command",
     ] {
         assert!(log.contains(warning), "{warning}: {log}");
     }
@@ -201,7 +201,7 @@ fn the_language_of_a_server_stays_after_a_restart() {
         |url| {
             vec![
                 ready(url),
-                settings_language(Some("de"), "en-US", MANAGE_GUILD),
+                settings("language", Some("de"), "en-US", MANAGE_GUILD),
             ]
         },
         None,
@@ -228,7 +228,7 @@ fn the_language_of_a_server_stays_after_a_restart() {
 
     // Again, with the same database.
     let discord = FakeDiscord::start(
-        |url| vec![ready(url), settings_language(None, "de", MANAGE_GUILD)],
+        |url| vec![ready(url), settings("language", None, "de", MANAGE_GUILD)],
         None,
     );
     fs::write(dir.path().join("config.toml"), config(Some(&discord), "")).unwrap();
@@ -248,7 +248,7 @@ fn the_language_of_a_server_stays_after_a_restart() {
 #[test]
 fn settings_only_for_people_who_may_manage_the_server() {
     let discord = FakeDiscord::start(
-        |url| vec![ready(url), settings_language(Some("en"), "de", 0)],
+        |url| vec![ready(url), settings("language", Some("en"), "de", 0)],
         None,
     );
     let (_dir, bot) = start(&discord);
@@ -263,4 +263,113 @@ fn settings_only_for_people_who_may_manage_the_server() {
     let (status, log) = bot.stop_with("TERM");
     assert_eq!(status, Some(0), "{log}");
     assert!(!log.contains("changed the language"), "{log}");
+}
+
+#[test]
+fn text_commands_after_the_prefix_or_a_mention() {
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                // Not for PuppyBot: a bot, another server, another command, no command.
+                message(1, "!info", GUILD, true),
+                message(2, "!info", OTHER_GUILD, false),
+                message(3, "!play some song", GUILD, false),
+                message(4, "! info", GUILD, false),
+                message(5, "hello", GUILD, false),
+                // For PuppyBot.
+                message(6, "!info", GUILD, false),
+                message(7, &format!("{MENTION} Hilfe"), GUILD, false),
+            ]
+        },
+        None,
+    );
+    let (_dir, bot) = start(&discord);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let answers = loop {
+        let answers: Vec<_> = discord
+            .requests()
+            .into_iter()
+            .filter(|request| format!("{} {}", request.method, request.path) == CHANNEL_MESSAGES)
+            .collect();
+        if answers.len() >= 2 || Instant::now() > deadline {
+            break answers;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert_eq!(answers.len(), 2, "{answers:#?}");
+
+    // In English, the language of a server that chose none, as a reply that mentions nobody.
+    let info = &answers[0].body;
+    assert!(
+        info.contains("a Discord bot of the Purple Puppy Project"),
+        "{info}"
+    );
+    assert!(info.contains(r#""message_reference":{"#), "{info}");
+    assert!(info.contains(r#""message_id":"6""#), "{info}");
+    assert!(
+        info.contains(r#""allowed_mentions":{"parse":[]}"#),
+        "{info}"
+    );
+    let help = &answers[1].body;
+    assert!(help.contains("`!help`: these commands"), "{help}");
+    assert!(help.contains(r#""message_id":"7""#), "{help}");
+}
+
+#[test]
+fn the_prefix_and_the_language_of_a_server() {
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                settings("prefix", Some("pb?"), "en-US", MANAGE_GUILD),
+                settings("language", Some("de"), "en-US", MANAGE_GUILD),
+                // The old prefix no longer, the new one in the language of the server.
+                message(1, "!info", GUILD, false),
+                message(2, "pb?info", GUILD, false),
+            ]
+        },
+        None,
+    );
+    let (_dir, bot) = start(&discord);
+    let answer = discord.wait_for_request(CHANNEL_MESSAGES);
+    assert!(
+        answer
+            .body
+            .contains("ein Discord-Bot des Purple Puppy Project"),
+        "{}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains(r#""message_id":"2""#),
+        "{}",
+        answer.body
+    );
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert!(
+        log.contains(&format!(
+            "changed the prefix of the server server={GUILD} prefix=\"pb?\""
+        )),
+        "{log}"
+    );
+    let settings_answers: Vec<_> = discord
+        .requests()
+        .into_iter()
+        .filter(|request| format!("{} {}", request.method, request.path) == SETTINGS_ANSWER)
+        .collect();
+    assert!(
+        settings_answers[0]
+            .body
+            .contains("From now on, PuppyBot's text commands start with `pb?` on this server"),
+        "{settings_answers:#?}"
+    );
+    let answers = discord
+        .requests()
+        .into_iter()
+        .filter(|request| format!("{} {}", request.method, request.path) == CHANNEL_MESSAGES)
+        .count();
+    assert_eq!(answers, 1);
 }
