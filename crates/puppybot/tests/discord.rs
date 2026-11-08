@@ -435,9 +435,9 @@ fn dice_in_the_channel_or_secret() {
         public.contains(r#""allowed_mentions":{"parse":[]}"#),
         "{public}"
     );
-    let secret = &commands[1].body;
-    assert!(secret.contains("`d6` ergibt ["), "{secret}");
-    assert!(secret.contains(r#""flags":64"#), "{secret}");
+    let ephemeral = &commands[1].body;
+    assert!(ephemeral.contains("`d6` ergibt ["), "{ephemeral}");
+    assert!(ephemeral.contains(r#""flags":64"#), "{ephemeral}");
 
     // As text commands, in the language of the server.
     assert!(
