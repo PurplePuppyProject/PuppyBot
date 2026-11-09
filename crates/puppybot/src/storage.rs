@@ -1,4 +1,5 @@
-//! The database of PuppyBot: the settings and the quotes of each server, in one file of
+//! The database of PuppyBot: the settings and the quotes of each server, and the repositories of
+//! GitHub that it announces, in one file of
 //! [redb](https://www.redb.org), e.g. in a Docker volume.
 //!
 //! Its data have a [`VERSION`], so that a later PuppyBot can store them differently, and convert
@@ -8,9 +9,11 @@
 //! The calls are short and the settings change rarely, so they run on the thread of the bot's
 //! runtime; a write returns once its data are on the disk.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
 
+use puppybot_core::github::MAX_REPOS;
 use puppybot_core::i18n::Lang;
 use puppybot_core::quotes::MAX_QUOTES;
 use puppybot_core::text_command;
@@ -48,6 +51,17 @@ const QUOTED: TableDefinition<(u64, u64), u32> = TableDefinition::new("quoted");
 
 /// The last number that each server gave a quote, so that no number comes twice.
 const QUOTE_NUMBERS: TableDefinition<u64, u32> = TableDefinition::new("quote_numbers");
+
+/// The repositories of GitHub that each server announces, by the server's ID, the repository and
+/// the branch: the ID of the channel, and whether the releases are announced, too.
+const WATCHES: TableDefinition<(u64, &str, &str), (u64, bool)> =
+    TableDefinition::new("github_watches");
+
+/// The newest commit that PuppyBot saw of each branch, by the repository and the branch.
+const SEEN_COMMITS: TableDefinition<(&str, &str), &str> = TableDefinition::new("github_commits");
+
+/// The ID of the newest release that PuppyBot saw of each repository.
+const SEEN_RELEASES: TableDefinition<&str, u64> = TableDefinition::new("github_releases");
 
 /// The settings of the servers. [`Storage`] keeps them; tests put in settings that fail.
 pub trait Settings {
@@ -171,10 +185,96 @@ pub trait Quotes {
     ) -> Result<Option<u32>, Error>;
 }
 
-/// All that PuppyBot stores: the settings and the quotes.
-pub trait Store: Settings + Quotes {}
+/// A repository of GitHub that a server announces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Watch {
+    /// The repository, `owner/name`, as GitHub writes it.
+    pub repo: String,
+    /// The branch.
+    pub branch: String,
+    /// The ID of the channel.
+    pub channel: u64,
+    /// Whether its releases are announced, too.
+    pub releases: bool,
+}
 
-impl<T: Settings + Quotes> Store for T {}
+/// What PuppyBot saw of a branch and its repository when someone added it: from there on, it
+/// announces what is new.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Seen {
+    /// The hash of the newest commit of the branch, none if it has none.
+    pub commit: Option<String>,
+    /// The ID of the newest release of the repository, 0 if it has none, or none if its
+    /// releases aren't announced.
+    pub release: Option<u64>,
+}
+
+/// What adding a repository did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Watched {
+    /// The server announces it now.
+    New,
+    /// The server announced it already, and now in that channel, with releases or without.
+    Changed,
+    /// The server announces [`MAX_REPOS`] already.
+    Full,
+}
+
+/// The repositories of GitHub that the servers announce. [`Storage`] keeps them; tests put in
+/// some that fail.
+pub trait Watches {
+    /// The repositories that `guild` announces, or all servers', if it is none, with the
+    /// servers.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] if they can't be read.
+    fn watches(
+        &self,
+        guild: Option<Id<GuildMarker>>,
+    ) -> Result<Vec<(Id<GuildMarker>, Watch)>, Error>;
+
+    /// Announces `watch` on `guild`, or changes the channel and the releases of the same
+    /// repository and branch there, and notes what PuppyBot saw of it now, `seen`, unless it
+    /// noted something already, e.g. for another server.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] if it can't be saved, e.g. as the disk is full.
+    fn add_watch(
+        &self,
+        guild: Id<GuildMarker>,
+        watch: &Watch,
+        seen: &Seen,
+    ) -> Result<Watched, Error>;
+
+    /// Stops announcing `repo`, in any case, on all its branches on `guild`, and returns whether
+    /// it did. What PuppyBot saw of it goes, too, if no server announces it any more.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] if it can't be saved, e.g. as the disk is full.
+    fn remove_watch(&self, guild: Id<GuildMarker>, repo: &str) -> Result<bool, Error>;
+
+    /// Notes `commit` as the newest of `branch` of `repo`, and returns the one noted before.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] if it can't be saved, e.g. as the disk is full.
+    fn swap_commit(&self, repo: &str, branch: &str, commit: &str) -> Result<Option<String>, Error>;
+
+    /// Notes the release `id` as the newest of `repo`, and returns the one noted before.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] if it can't be saved, e.g. as the disk is full.
+    fn swap_release(&self, repo: &str, id: u64) -> Result<Option<u64>, Error>;
+}
+
+/// All that PuppyBot stores: the settings, the quotes and the repositories that it announces.
+pub trait Store: Settings + Quotes + Watches {}
+
+impl<T: Settings + Quotes + Watches> Store for T {}
 
 /// The database.
 pub struct Storage {
@@ -300,6 +400,36 @@ impl Quotes for Storage {
     }
 }
 
+impl Watches for Storage {
+    fn watches(
+        &self,
+        guild: Option<Id<GuildMarker>>,
+    ) -> Result<Vec<(Id<GuildMarker>, Watch)>, Error> {
+        watches(&self.database, guild.map(Id::get)).map_err(Error::Access)
+    }
+
+    fn add_watch(
+        &self,
+        guild: Id<GuildMarker>,
+        watch: &Watch,
+        seen: &Seen,
+    ) -> Result<Watched, Error> {
+        add_watch(&self.database, guild.get(), watch, seen, MAX_REPOS).map_err(Error::Access)
+    }
+
+    fn remove_watch(&self, guild: Id<GuildMarker>, repo: &str) -> Result<bool, Error> {
+        remove_watch(&self.database, guild.get(), repo).map_err(Error::Access)
+    }
+
+    fn swap_commit(&self, repo: &str, branch: &str, commit: &str) -> Result<Option<String>, Error> {
+        swap_commit(&self.database, repo, branch, commit).map_err(Error::Access)
+    }
+
+    fn swap_release(&self, repo: &str, id: u64) -> Result<Option<u64>, Error> {
+        swap_release(&self.database, repo, id).map_err(Error::Access)
+    }
+}
+
 /// The version of the data in `database`. A new database gets [`VERSION`] and the tables, so
 /// that reading finds them; one of another version stays as it is.
 fn prepare(database: &Database) -> Result<u64, redb::Error> {
@@ -324,6 +454,9 @@ fn prepare(database: &Database) -> Result<u64, redb::Error> {
     write.open_table(QUOTES)?;
     write.open_table(QUOTED)?;
     write.open_table(QUOTE_NUMBERS)?;
+    write.open_table(WATCHES)?;
+    write.open_table(SEEN_COMMITS)?;
+    write.open_table(SEEN_RELEASES)?;
     write.commit()?;
     Ok(VERSION)
 }
@@ -494,6 +627,168 @@ fn forget_message(
     Ok(Some(number))
 }
 
+/// The repositories that `guild` announces, or all, see [`Watches::watches`]. A server's ID of 0,
+/// which Discord doesn't give, counts as none.
+fn watches(
+    database: &Database,
+    guild: Option<u64>,
+) -> Result<Vec<(Id<GuildMarker>, Watch)>, redb::Error> {
+    let read = database.begin_read()?;
+    let table = read.open_table(WATCHES)?;
+    let mut found = Vec::new();
+    for entry in table.iter()? {
+        let (key, value) = entry?;
+        let ((server, repo, branch), (channel, releases)) = (key.value(), value.value());
+        let wanted = guild.is_none_or(|guild| guild == server);
+        if let Some(server) = Id::new_checked(server).filter(|_| wanted) {
+            let watch = Watch {
+                repo: repo.to_owned(),
+                branch: branch.to_owned(),
+                channel,
+                releases,
+            };
+            found.push((server, watch));
+        }
+    }
+    Ok(found)
+}
+
+/// Announces `watch` on `guild`, see [`Watches::add_watch`], if it has fewer than `most`.
+fn add_watch(
+    database: &Database,
+    guild: u64,
+    watch: &Watch,
+    seen: &Seen,
+    most: usize,
+) -> Result<Watched, redb::Error> {
+    let write = database.begin_write()?;
+    let watched = add_watch_in(&write, guild, watch, seen, most)?;
+    write.commit()?;
+    Ok(watched)
+}
+
+/// Adds `watch` to the repositories of `guild` in `write`, see [`add_watch`].
+fn add_watch_in(
+    write: &WriteTransaction,
+    guild: u64,
+    watch: &Watch,
+    seen: &Seen,
+    most: usize,
+) -> Result<Watched, redb::Error> {
+    let mut table = write.open_table(WATCHES)?;
+    let key = (guild, watch.repo.as_str(), watch.branch.as_str());
+    let known = table.get(key)?.is_some();
+    let count = table.range(of_guild(guild))?.count();
+    let watched = match (known, count < most) {
+        (true, _) => Watched::Changed,
+        (false, true) => Watched::New,
+        (false, false) => return Ok(Watched::Full),
+    };
+    table.insert(key, (watch.channel, watch.releases))?;
+    let mut commits = write.open_table(SEEN_COMMITS)?;
+    let branch = (watch.repo.as_str(), watch.branch.as_str());
+    let noted = commits.get(branch)?.is_some();
+    if let Some(commit) = seen.commit.as_deref().filter(|_| !noted) {
+        commits.insert(branch, commit)?;
+    }
+    let mut releases = write.open_table(SEEN_RELEASES)?;
+    let noted = releases.get(watch.repo.as_str())?.is_some();
+    if let Some(release) = seen.release.filter(|_| !noted) {
+        releases.insert(watch.repo.as_str(), release)?;
+    }
+    Ok(watched)
+}
+
+/// The keys of the repositories of `guild` in [`WATCHES`].
+fn of_guild(guild: u64) -> std::ops::Range<(u64, &'static str, &'static str)> {
+    (guild, "", "")..(guild.saturating_add(1), "", "")
+}
+
+/// Stops announcing `repo` on `guild`, see [`Watches::remove_watch`].
+fn remove_watch(database: &Database, guild: u64, repo: &str) -> Result<bool, redb::Error> {
+    let write = database.begin_write()?;
+    let removed = remove_watch_in(&write, guild, repo)?;
+    write.commit()?;
+    Ok(removed)
+}
+
+/// Removes the watches of `repo` on `guild` in `write`, see [`remove_watch`].
+fn remove_watch_in(write: &WriteTransaction, guild: u64, repo: &str) -> Result<bool, redb::Error> {
+    let mut table = write.open_table(WATCHES)?;
+    let mut gone = Vec::new();
+    for entry in table.range(of_guild(guild))? {
+        let (key, _) = entry?;
+        let (_, name, branch) = key.value();
+        if name.eq_ignore_ascii_case(repo) {
+            gone.push((name.to_owned(), branch.to_owned()));
+        }
+    }
+    for (name, branch) in &gone {
+        table.remove((guild, name.as_str(), branch.as_str()))?;
+    }
+    // What PuppyBot saw of what no server announces any more.
+    let mut branches = BTreeSet::new();
+    let mut with_releases = BTreeSet::new();
+    for entry in table.iter()? {
+        let (key, value) = entry?;
+        let (_, name, branch) = key.value();
+        branches.insert((name.to_owned(), branch.to_owned()));
+        if value.value().1 {
+            with_releases.insert(name.to_owned());
+        }
+    }
+    let mut commits = write.open_table(SEEN_COMMITS)?;
+    let mut releases = write.open_table(SEEN_RELEASES)?;
+    for (name, branch) in &gone {
+        if !branches.contains(&(name.clone(), branch.clone())) {
+            commits.remove((name.as_str(), branch.as_str()))?;
+        }
+        if !with_releases.contains(name) {
+            releases.remove(name.as_str())?;
+        }
+    }
+    Ok(!gone.is_empty())
+}
+
+/// Notes `commit` as the newest of `branch` of `repo`, see [`Watches::swap_commit`]. An unchanged
+/// one needs no write to the disk.
+fn swap_commit(
+    database: &Database,
+    repo: &str,
+    branch: &str,
+    commit: &str,
+) -> Result<Option<String>, redb::Error> {
+    let read = database.begin_read()?;
+    let before = read
+        .open_table(SEEN_COMMITS)?
+        .get((repo, branch))?
+        .map(|sha| sha.value().to_owned());
+    if before.as_deref() != Some(commit) {
+        let write = database.begin_write()?;
+        write
+            .open_table(SEEN_COMMITS)?
+            .insert((repo, branch), commit)?;
+        write.commit()?;
+    }
+    Ok(before)
+}
+
+/// Notes the release `id` as the newest of `repo`, see [`Watches::swap_release`]. An unchanged
+/// one needs no write to the disk.
+fn swap_release(database: &Database, repo: &str, id: u64) -> Result<Option<u64>, redb::Error> {
+    let read = database.begin_read()?;
+    let before = read
+        .open_table(SEEN_RELEASES)?
+        .get(repo)?
+        .map(|id| id.value());
+    if before != Some(id) {
+        let write = database.begin_write()?;
+        write.open_table(SEEN_RELEASES)?.insert(repo, id)?;
+        write.commit()?;
+    }
+    Ok(before)
+}
+
 /// Stores `value` for the server `guild` in `table`.
 fn set(
     database: &Database,
@@ -621,6 +916,110 @@ mod tests {
         );
     }
 
+    /// The watch of `repo` on `branch` in the channel 4.
+    fn watch(repo: &str, branch: &str, releases: bool) -> Watch {
+        Watch {
+            repo: repo.to_owned(),
+            branch: branch.to_owned(),
+            channel: 4,
+            releases,
+        }
+    }
+
+    /// What PuppyBot saw when someone added a repository: the commit `commit`, and the
+    /// release 7.
+    fn seen(commit: &str) -> Seen {
+        Seen {
+            commit: Some(commit.to_owned()),
+            release: Some(7),
+        }
+    }
+
+    #[test]
+    fn repositories_that_servers_announce() {
+        let storage = Storage::in_memory();
+        let other = Id::new(2);
+        assert_eq!(storage.watches(None).unwrap(), []);
+        let puppybot = watch("PurplePuppyProject/PuppyBot", "main", true);
+        let add =
+            |guild, watch: &Watch, seen: &Seen| storage.add_watch(guild, watch, seen).unwrap();
+        assert_eq!(add(GUILD, &puppybot, &seen("aaaaaaa")), Watched::New);
+        assert_eq!(
+            add(GUILD, &watch("a/b", "dev", false), &Seen::default()),
+            Watched::New
+        );
+        // For another server: what PuppyBot saw stays.
+        assert_eq!(add(other, &puppybot, &seen("bbbbbbb")), Watched::New);
+        // The same repository and branch again: in another channel now.
+        let moved = Watch {
+            channel: 5,
+            ..puppybot.clone()
+        };
+        assert_eq!(add(GUILD, &moved, &seen("ccccccc")), Watched::Changed);
+        let watches = storage.watches(Some(GUILD)).unwrap();
+        assert_eq!(
+            watches,
+            [(GUILD, moved), (GUILD, watch("a/b", "dev", false))]
+        );
+        assert_eq!(storage.watches(None).unwrap().len(), 3);
+
+        // What PuppyBot saw, and sees now.
+        let repo = "PurplePuppyProject/PuppyBot";
+        let swap = |sha| storage.swap_commit(repo, "main", sha).unwrap();
+        assert_eq!(swap("ddddddd").as_deref(), Some("aaaaaaa"));
+        assert_eq!(swap("ddddddd").as_deref(), Some("ddddddd"));
+        assert_eq!(storage.swap_release(repo, 9).unwrap(), Some(7));
+        assert_eq!(storage.swap_release(repo, 9).unwrap(), Some(9));
+        assert_eq!(storage.swap_commit("a/b", "dev", "eeeeeee").unwrap(), None);
+        assert_eq!(storage.swap_release("a/b", 1).unwrap(), None);
+
+        // In any case; what no server announces any more goes, what one still does stays.
+        assert!(storage.remove_watch(GUILD, "a/B").unwrap());
+        assert!(!storage.remove_watch(GUILD, "a/b").unwrap());
+        assert_eq!(storage.swap_commit("a/b", "dev", "fffffff").unwrap(), None);
+        assert_eq!(storage.swap_release("a/b", 2).unwrap(), None);
+        assert!(
+            storage
+                .remove_watch(GUILD, "purplepuppyproject/puppybot")
+                .unwrap()
+        );
+        assert_eq!(swap("ddddddd").as_deref(), Some("ddddddd"));
+        assert_eq!(storage.watches(None).unwrap(), [(other, puppybot)]);
+    }
+
+    #[test]
+    fn the_most_repositories_of_a_server() {
+        let storage = Storage::in_memory();
+        let guild = GUILD.get();
+        let add = |repo, releases| {
+            let seen = seen("aaaaaaa");
+            add_watch(
+                &storage.database,
+                guild,
+                &watch(repo, "main", releases),
+                &seen,
+                2,
+            )
+            .unwrap()
+        };
+        assert_eq!(add("a/b", false), Watched::New);
+        assert_eq!(add("a/c", false), Watched::New);
+        assert_eq!(add("a/d", false), Watched::Full);
+        // Nothing noted of it.
+        assert_eq!(storage.swap_commit("a/d", "main", "bbbbbbb").unwrap(), None);
+        // A change of one that it has is no new one.
+        assert_eq!(add("a/b", true), Watched::Changed);
+        // A server's ID of 0 is no server.
+        let write = storage.database.begin_write().unwrap();
+        write
+            .open_table(WATCHES)
+            .unwrap()
+            .insert((0, "a/e", "main"), (4, false))
+            .unwrap();
+        write.commit().unwrap();
+        assert_eq!(storage.watches(None).unwrap().len(), 2);
+    }
+
     #[test]
     fn a_database_without_all_tables_gets_them() {
         let dir = tempfile::tempdir().unwrap();
@@ -645,6 +1044,8 @@ mod tests {
         assert_eq!(storage.language(GUILD).unwrap(), Some(Lang::De));
         assert_eq!(storage.prefix(GUILD).unwrap(), None);
         assert_eq!(storage.quote(GUILD, 1).unwrap(), None);
+        assert_eq!(storage.watches(None).unwrap(), []);
+        assert_eq!(storage.swap_release("a/b", 1).unwrap(), None);
     }
 
     #[test]

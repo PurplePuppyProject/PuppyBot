@@ -5,10 +5,13 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as StdError;
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use puppybot_core::dice::Dice;
 use puppybot_core::games::{Coin, GameText, Guessing, Hand, Hint};
+use puppybot_core::github::{
+    Commit, GithubText, Release, Repo, Watch as Shown, is_valid_branch, new_commits, new_releases,
+};
 use puppybot_core::i18n::Lang;
 use puppybot_core::poll::Poll;
 use puppybot_core::quotes::{self, QuoteText};
@@ -30,8 +33,9 @@ use twilight_model::util::Timestamp;
 
 use crate::commands::{self, Answer, Audience, Request};
 use crate::config::DiscordConfig;
+use crate::github::{self, Github, OwnedCommit, OwnedRelease};
 use crate::shutdown::{Signals, Stop};
-use crate::storage::{Deleted, Quote, Saved, Store};
+use crate::storage::{Deleted, Quote, Saved, Seen, Store, Watch, Watched};
 
 /// What PuppyBot gets from the gateway: events of its servers, and the messages on them with
 /// their text, for the text commands. Slash commands come without an intent. Discord counts
@@ -52,6 +56,9 @@ const EVENTS: EventTypeFlags = EventTypeFlags::READY
 
 /// How long PuppyBot waits for Discord to close the connection after a signal.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long PuppyBot trusts GitHub's answer whether a repository is public.
+const PUBLIC_FOR: Duration = Duration::from_secs(3600);
 
 /// Why PuppyBot can't connect to Discord, or stopped being connected.
 #[derive(Debug)]
@@ -107,9 +114,16 @@ pub struct Discord {
 
 impl Discord {
     /// The connection with `token`, as `config` says, after [`prepare_tls`], with the settings
-    /// and the quotes of the servers in `store`. It connects once [`Self::run`] runs.
+    /// and the quotes of the servers in `store`, and `github`, which it checks every `interval`
+    /// for the repositories that the servers announce. It connects once [`Self::run`] runs.
     #[must_use]
-    pub fn new(config: &DiscordConfig, token: &SecretString, store: Box<dyn Store>) -> Self {
+    pub fn new(
+        config: &DiscordConfig,
+        token: &SecretString,
+        store: Box<dyn Store>,
+        github: Github,
+        interval: Duration,
+    ) -> Self {
         let token = token.expose_secret().to_owned();
         let mut http = Client::builder()
             .token(token.clone())
@@ -131,6 +145,9 @@ impl Discord {
                 mentions: OnceCell::new(),
                 die: crate::random::die,
                 games: RefCell::new(BTreeMap::new()),
+                github,
+                interval,
+                public: RefCell::new(BTreeMap::new()),
             },
         }
     }
@@ -143,28 +160,32 @@ impl Discord {
     /// [`Error::Closed`] if Discord closed the connection for good.
     pub async fn run(mut self, signals: &mut Signals) -> Result<Stop, Error> {
         let mut last_close = None;
+        let bot = &self.bot;
+        let shard = &mut self.shard;
+        // Between the events, in the same task: twilight sends the heartbeats only while it
+        // waits for an event, so a slow answer of GitHub mustn't hold it up.
+        let github = bot.watch_github();
+        tokio::pin!(github);
         let stop = loop {
             let item = tokio::select! {
                 stop = signals.recv() => break stop,
-                item = self.shard.next_event(EVENTS) => item,
+                item = shard.next_event(EVENTS) => item,
+                () = &mut github => continue,
             };
             match item {
                 Some(Ok(Event::GatewayClose(frame))) => last_close = frame,
-                Some(Ok(event)) => self.bot.handle(event).await,
+                Some(Ok(event)) => bot.handle(event).await,
                 Some(Err(error)) => tracing::warn!("can't read an event of Discord: {error}"),
                 // The shard may not be polled any more.
                 None => return Err(Error::Closed(last_close)),
             }
         };
         tracing::info!(signal = stop.name(), "closing the connection to Discord");
-        self.shard.close(CloseFrame::NORMAL);
+        shard.close(CloseFrame::NORMAL);
         // Until Discord closed it, too, but not for long. No events are wanted any more, so the
         // next that comes is Discord's close, unless something fails.
-        let _ = tokio::time::timeout(
-            CLOSE_TIMEOUT,
-            self.shard.next_event(EventTypeFlags::empty()),
-        )
-        .await;
+        let _ =
+            tokio::time::timeout(CLOSE_TIMEOUT, shard.next_event(EventTypeFlags::empty())).await;
         Ok(stop)
     }
 }
@@ -182,6 +203,12 @@ struct Bot {
     die: fn(u32) -> Option<u32>,
     /// The games of guessing a number that run, by channel. A restart ends them.
     games: RefCell<BTreeMap<Id<ChannelMarker>, Guessing>>,
+    /// GitHub's API, for the repositories that the servers announce.
+    github: Github,
+    /// How long PuppyBot waits between its checks of GitHub, see [`github::interval`].
+    interval: Duration,
+    /// When GitHub last said whether each repository is public, and what it said.
+    public: RefCell<BTreeMap<String, (Instant, bool)>>,
 }
 
 impl Bot {
@@ -239,12 +266,36 @@ impl Bot {
             return;
         };
         let channel = interaction.channel.as_ref().map(|channel| channel.id);
-        let response = commands::response(self.execute(asked.request, asked.lang, channel).await);
-        let answer = self.http.interaction(interaction.application_id);
-        if let Err(error) = answer
-            .create_response(interaction.id, &interaction.token, &response)
-            .await
-        {
+        let client = self.http.interaction(interaction.application_id);
+        let token = &interaction.token;
+        let answered = if matches!(asked.request, Request::GithubAdd { .. }) {
+            // GitHub may take longer than Discord waits for an answer, 3 seconds: first that
+            // PuppyBot is working on it, then the answer.
+            match client
+                .create_response(interaction.id, token, &commands::working())
+                .await
+            {
+                Ok(_) => {
+                    let answer = self.execute(asked.request, asked.lang, channel).await;
+                    let nobody = AllowedMentions::default();
+                    client
+                        .update_response(token)
+                        .content(Some(&answer.content))
+                        .allowed_mentions(Some(&nobody))
+                        .await
+                        .map(drop)
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            let response =
+                commands::response(self.execute(asked.request, asked.lang, channel).await);
+            client
+                .create_response(interaction.id, token, &response)
+                .await
+                .map(drop)
+        };
+        if let Err(error) = answered {
             tracing::warn!("can't answer a command: {error}");
         }
     }
@@ -286,6 +337,18 @@ impl Bot {
                 Text::poll_posted(posted).render(lang)
             }
             Request::SaveQuote(guild, quote) => self.save_quote(guild, quote, lang),
+            Request::GithubAdd {
+                guild,
+                repo,
+                channel,
+                branch,
+                releases,
+            } => {
+                self.github_add(guild, repo, channel, branch, releases, lang)
+                    .await
+            }
+            Request::GithubRemove(guild, repo) => self.github_remove(guild, repo, lang),
+            Request::GithubList(guild) => self.github_list(guild, lang),
             Request::ShowQuote(guild, number) => {
                 let (content, shown) = self.show_quote(guild, number, lang);
                 let audience = if shown {
@@ -310,49 +373,69 @@ impl Bot {
                 return Answer::new(self.rolled(&dice, lang), audience);
             }
             Request::Answer(text) => text.render(lang),
-            Request::ShowLanguage(guild) => match self.store.language(guild) {
-                Ok(chosen) => Text::LanguageIs { chosen }.render(lang),
-                Err(error) => {
-                    tracing::warn!(server = %guild, "can't read the language of the server from the database: {error}");
-                    Text::StorageFailed.render(lang)
-                }
-            },
-            Request::SetLanguage(guild, new) => match self.store.set_language(guild, new) {
-                Ok(()) => {
-                    tracing::info!(
-                        server = %guild,
-                        language = new.code(),
-                        "changed the language of the server"
-                    );
-                    Text::LanguageSet { lang: new }.render(lang)
-                }
-                Err(error) => {
-                    tracing::warn!(server = %guild, "can't save the language of the server in the database: {error}");
-                    Text::StorageFailed.render(lang)
-                }
-            },
-            Request::ShowPrefix(guild) => match self.store.prefix(guild) {
-                Ok(chosen) => Text::PrefixIs {
-                    chosen: chosen.as_deref(),
-                }
-                .render(lang),
-                Err(error) => {
-                    tracing::warn!(server = %guild, "can't read the prefix of the server from the database: {error}");
-                    Text::StorageFailed.render(lang)
-                }
-            },
-            Request::SetPrefix(guild, prefix) => match self.store.set_prefix(guild, prefix) {
-                Ok(()) => {
-                    tracing::info!(server = %guild, prefix, "changed the prefix of the server");
-                    Text::PrefixSet { prefix }.render(lang)
-                }
-                Err(error) => {
-                    tracing::warn!(server = %guild, "can't save the prefix of the server in the database: {error}");
-                    Text::StorageFailed.render(lang)
-                }
-            },
+            Request::ShowLanguage(guild) => self.show_language(guild, lang),
+            Request::SetLanguage(guild, new) => self.change_language(guild, new, lang),
+            Request::ShowPrefix(guild) => self.show_prefix(guild, lang),
+            Request::SetPrefix(guild, prefix) => self.change_prefix(guild, prefix, lang),
         };
         Answer::new(content, Audience::Asker)
+    }
+
+    /// The language of `guild`, as /settings language shows it, in `lang`.
+    fn show_language(&self, guild: Id<GuildMarker>, lang: Lang) -> String {
+        match self.store.language(guild) {
+            Ok(chosen) => Text::LanguageIs { chosen }.render(lang),
+            Err(error) => {
+                tracing::warn!(server = %guild, "can't read the language of the server from the database: {error}");
+                Text::StorageFailed.render(lang)
+            }
+        }
+    }
+
+    /// Chooses `new` as the language of `guild`, and returns the answer, in `lang`.
+    fn change_language(&self, guild: Id<GuildMarker>, new: Lang, lang: Lang) -> String {
+        match self.store.set_language(guild, new) {
+            Ok(()) => {
+                tracing::info!(
+                    server = %guild,
+                    language = new.code(),
+                    "changed the language of the server"
+                );
+                Text::LanguageSet { lang: new }.render(lang)
+            }
+            Err(error) => {
+                tracing::warn!(server = %guild, "can't save the language of the server in the database: {error}");
+                Text::StorageFailed.render(lang)
+            }
+        }
+    }
+
+    /// The prefix of `guild`, as /settings prefix shows it, in `lang`.
+    fn show_prefix(&self, guild: Id<GuildMarker>, lang: Lang) -> String {
+        match self.store.prefix(guild) {
+            Ok(chosen) => Text::PrefixIs {
+                chosen: chosen.as_deref(),
+            }
+            .render(lang),
+            Err(error) => {
+                tracing::warn!(server = %guild, "can't read the prefix of the server from the database: {error}");
+                Text::StorageFailed.render(lang)
+            }
+        }
+    }
+
+    /// Chooses `prefix` for the text commands of `guild`, and returns the answer, in `lang`.
+    fn change_prefix(&self, guild: Id<GuildMarker>, prefix: &str, lang: Lang) -> String {
+        match self.store.set_prefix(guild, prefix) {
+            Ok(()) => {
+                tracing::info!(server = %guild, prefix, "changed the prefix of the server");
+                Text::PrefixSet { prefix }.render(lang)
+            }
+            Err(error) => {
+                tracing::warn!(server = %guild, "can't save the prefix of the server in the database: {error}");
+                Text::StorageFailed.render(lang)
+            }
+        }
     }
 
     /// Flips a coin, and returns the answer, in `lang`.
@@ -518,6 +601,306 @@ impl Bot {
         text.render(lang)
     }
 
+    /// Announces `repo` on `guild` in `channel`, on `branch` or else the default branch, with its
+    /// releases or not, if GitHub has it as a public repository, and returns the answer, in
+    /// `lang`. What GitHub has now isn't announced, only what comes later.
+    async fn github_add(
+        &self,
+        guild: Id<GuildMarker>,
+        repo: &str,
+        channel: Id<ChannelMarker>,
+        branch: Option<&str>,
+        releases: bool,
+        lang: Lang,
+    ) -> String {
+        let Some(repo) = Repo::parse(repo) else {
+            return GithubText::InvalidRepo.render(lang);
+        };
+        if branch.is_some_and(|branch| !is_valid_branch(branch)) {
+            return GithubText::InvalidBranch.render(lang);
+        }
+        let name = repo.to_string();
+        let info = match self.github.repo(&name).await {
+            Ok(info) if info.public => info,
+            Ok(_) | Err(github::Error::NotFound) => {
+                return GithubText::NoSuchRepo { repo: &name }.render(lang);
+            }
+            Err(error) => return github_failed(&error, lang),
+        };
+        // As GitHub writes it.
+        let repo = info.repo.to_string();
+        let branch = branch.unwrap_or(&info.default_branch);
+        let commits = match self.github.commits(&repo, branch, false).await {
+            Ok(commits) => commits.unwrap_or_default(),
+            Err(github::Error::NotFound) => {
+                return GithubText::NoSuchBranch {
+                    repo: &repo,
+                    branch,
+                }
+                .render(lang);
+            }
+            Err(error) => return github_failed(&error, lang),
+        };
+        let release = if releases {
+            match self.github.releases(&repo, false).await {
+                Ok(found) => Some(newest_release(&found.unwrap_or_default())),
+                Err(error) => return github_failed(&error, lang),
+            }
+        } else {
+            None
+        };
+        let seen = Seen {
+            commit: commits.first().map(|commit| commit.sha.clone()),
+            release,
+        };
+        let watch = Watch {
+            repo: repo.clone(),
+            branch: branch.to_owned(),
+            channel: channel.get(),
+            releases,
+        };
+        match self.store.add_watch(guild, &watch, &seen) {
+            Ok(Watched::Full) => GithubText::Full.render(lang),
+            Ok(_) => {
+                tracing::info!(server = %guild, repo, branch, "announcing a repository of GitHub");
+                let channel = format!("<#{channel}>");
+                GithubText::Added {
+                    repo: &repo,
+                    branch,
+                    channel: &channel,
+                    releases,
+                }
+                .render(lang)
+            }
+            Err(error) => {
+                tracing::warn!(server = %guild, "can't save a repository to announce in the database: {error}");
+                Text::StorageFailed.render(lang)
+            }
+        }
+    }
+
+    /// No longer announces `repo` on `guild`, and returns the answer, in `lang`.
+    fn github_remove(&self, guild: Id<GuildMarker>, repo: &str, lang: Lang) -> String {
+        let Some(repo) = Repo::parse(repo) else {
+            return GithubText::InvalidRepo.render(lang);
+        };
+        let repo = repo.to_string();
+        match self.store.remove_watch(guild, &repo) {
+            Ok(true) => {
+                tracing::info!(server = %guild, repo, "no longer announcing a repository of GitHub");
+                GithubText::Removed { repo: &repo }.render(lang)
+            }
+            Ok(false) => GithubText::NotWatched { repo: &repo }.render(lang),
+            Err(error) => {
+                tracing::warn!(server = %guild, "can't remove a repository to announce from the database: {error}");
+                Text::StorageFailed.render(lang)
+            }
+        }
+    }
+
+    /// The repositories that `guild` announces, in `lang`.
+    fn github_list(&self, guild: Id<GuildMarker>, lang: Lang) -> String {
+        let watches = match self.store.watches(Some(guild)) {
+            Ok(watches) => watches,
+            Err(error) => {
+                tracing::warn!(server = %guild, "can't read the repositories to announce from the database: {error}");
+                return Text::StorageFailed.render(lang);
+            }
+        };
+        let channels: Vec<String> = watches
+            .iter()
+            .map(|(_, watch)| format!("<#{}>", watch.channel))
+            .collect();
+        let shown: Vec<Shown<'_>> = watches
+            .iter()
+            .zip(&channels)
+            .map(|((_, watch), channel)| Shown {
+                repo: &watch.repo,
+                branch: &watch.branch,
+                channel,
+                releases: watch.releases,
+            })
+            .collect();
+        GithubText::Watched(&shown).render(lang)
+    }
+
+    /// Checks GitHub again and again, between the events: at once, and then after each
+    /// interval, see [`github::interval`].
+    async fn watch_github(&self) {
+        loop {
+            let requests = self.github_round().await;
+            let wait = github::interval(self.interval, requests, self.github.has_token());
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    /// One check of the repositories that the servers announce. Returns how many requests to
+    /// GitHub it took, about.
+    async fn github_round(&self) -> usize {
+        match self.store.watches(None) {
+            Ok(watches) => self.check_github(&watches).await,
+            Err(error) => {
+                tracing::warn!(
+                    "can't read the repositories to announce from the database: {error}"
+                );
+                0
+            }
+        }
+    }
+
+    /// Checks GitHub for `watches`, the repositories of the servers, and announces what is new,
+    /// of the public ones. Returns how many requests that took, about.
+    async fn check_github(&self, watches: &[(Id<GuildMarker>, Watch)]) -> usize {
+        let mut branches: BTreeMap<(&str, &str), Vec<Place>> = BTreeMap::new();
+        let mut releases: BTreeMap<&str, Vec<Place>> = BTreeMap::new();
+        for (guild, watch) in watches {
+            if let Some(channel) = Id::new_checked(watch.channel) {
+                let place = (*guild, channel);
+                let branch = (watch.repo.as_str(), watch.branch.as_str());
+                branches.entry(branch).or_default().push(place);
+                if watch.releases {
+                    releases.entry(watch.repo.as_str()).or_default().push(place);
+                }
+            }
+        }
+        let repos: BTreeSet<&str> = branches.keys().map(|&(repo, _)| repo).collect();
+        let mut public = BTreeSet::new();
+        for &repo in &repos {
+            if self.is_public(repo).await {
+                public.insert(repo);
+            }
+        }
+        for (&(repo, branch), places) in &branches {
+            if public.contains(repo) {
+                self.check_commits(repo, branch, places).await;
+            }
+        }
+        for (&repo, places) in &releases {
+            if public.contains(repo) {
+                self.check_releases(repo, places).await;
+            }
+        }
+        repos.len() + branches.len() + releases.len()
+    }
+
+    /// Whether `repo` is public, as GitHub said within the last hour. Without an answer, the
+    /// last one counts, and at first, no.
+    async fn is_public(&self, repo: &str) -> bool {
+        let known = self.public.borrow().get(repo).copied();
+        if let Some((asked, public)) = known
+            && asked.elapsed() < PUBLIC_FOR
+        {
+            return public;
+        }
+        let public = match self.github.repo(repo).await {
+            Ok(info) => info.public,
+            Err(github::Error::NotFound) => false,
+            Err(error) => {
+                tracing::warn!(
+                    repo,
+                    "can't ask GitHub whether a repository is public: {error}"
+                );
+                return known.is_some_and(|(_, public)| public);
+            }
+        };
+        if !public {
+            tracing::warn!(repo, "not announcing a repository that isn't public");
+        }
+        self.public
+            .borrow_mut()
+            .insert(repo.to_owned(), (Instant::now(), public));
+        public
+    }
+
+    /// Checks the commits of `branch` of `repo`, and announces the new ones in `places`.
+    async fn check_commits(&self, repo: &str, branch: &str, places: &[Place]) {
+        let commits = match self.github.commits(repo, branch, true).await {
+            Ok(Some(commits)) => commits,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(repo, branch, "can't check the commits on GitHub: {error}");
+                return;
+            }
+        };
+        let Some(newest) = commits.first() else {
+            return;
+        };
+        let last = match self.store.swap_commit(repo, branch, &newest.sha) {
+            Ok(Some(last)) => last,
+            // The first check notes only where the branch is.
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    repo,
+                    branch,
+                    "can't save the newest commit in the database: {error}"
+                );
+                return;
+            }
+        };
+        let commits: Vec<Commit<'_>> = commits.iter().map(OwnedCommit::commit).collect();
+        let new = new_commits(&commits, &last);
+        if new.commits.is_empty() {
+            return;
+        }
+        for &(guild, channel) in places {
+            let text = GithubText::Pushed {
+                repo,
+                branch,
+                commits: &new.commits,
+                more: new.more,
+                rewritten: new.rewritten,
+            };
+            self.announce(channel, &text.render(self.language(guild)))
+                .await;
+        }
+    }
+
+    /// Checks the releases of `repo`, and announces the new ones in `places`.
+    async fn check_releases(&self, repo: &str, places: &[Place]) {
+        let releases = match self.github.releases(repo, true).await {
+            Ok(Some(releases)) => releases,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(repo, "can't check the releases on GitHub: {error}");
+                return;
+            }
+        };
+        let last = match self.store.swap_release(repo, newest_release(&releases)) {
+            Ok(Some(last)) => last,
+            // The first check notes only which release is the newest.
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    repo,
+                    "can't save the newest release in the database: {error}"
+                );
+                return;
+            }
+        };
+        let releases: Vec<Release<'_>> = releases.iter().map(OwnedRelease::release).collect();
+        for release in new_releases(&releases, last) {
+            for &(guild, channel) in places {
+                let text = GithubText::Released { repo, release };
+                self.announce(channel, &text.render(self.language(guild)))
+                    .await;
+            }
+        }
+    }
+
+    /// Posts `content` in `channel`, as a message that mentions nobody.
+    async fn announce(&self, channel: Id<ChannelMarker>, content: &str) {
+        let nobody = AllowedMentions::default();
+        let message = self
+            .http
+            .create_message(channel)
+            .content(content)
+            .allowed_mentions(Some(&nobody));
+        if let Err(error) = message.await {
+            tracing::warn!(channel = %channel, "can't post an announcement: {error}");
+        }
+    }
+
     /// Messages that are gone, on `guild`: their quotes go with them.
     fn forget(&self, guild: Option<Id<GuildMarker>>, messages: &[Id<MessageMarker>]) {
         let Some(guild) = guild.filter(|guild| self.guilds.contains(guild)) else {
@@ -678,6 +1061,24 @@ impl Bot {
     }
 }
 
+/// Where PuppyBot announces something: the server, for its language, and the channel.
+type Place = (Id<GuildMarker>, Id<ChannelMarker>);
+
+/// The ID of the newest of `releases`, 0 if there are none.
+fn newest_release(releases: &[OwnedRelease]) -> u64 {
+    releases
+        .iter()
+        .map(|release| release.id)
+        .max()
+        .unwrap_or_default()
+}
+
+/// The answer when PuppyBot can't ask GitHub, as `error` says, in `lang`.
+fn github_failed(error: &github::Error, lang: Lang) -> String {
+    tracing::warn!("can't ask GitHub about a repository: {error}");
+    GithubText::GithubFailed.render(lang)
+}
+
 /// The answer to saving a quote, as `saved` says.
 const fn saved_text(saved: Saved) -> QuoteText<'static> {
     match saved {
@@ -765,7 +1166,8 @@ mod tests {
 
     use super::*;
     use crate::commands::tests::{GUILD, interaction};
-    use crate::storage::{self, Quotes, Settings, Storage};
+    use crate::fake_github::{FakeGithub, commits_json, releases_json, repo_json};
+    use crate::storage::{self, Quotes, Seen, Settings, Storage, Watch, Watched, Watches};
 
     /// Settings and quotes that can be neither read nor saved, e.g. on a full disk.
     struct Broken;
@@ -828,6 +1230,36 @@ mod tests {
         }
     }
 
+    impl Watches for Broken {
+        fn watches(
+            &self,
+            _: Option<Id<GuildMarker>>,
+        ) -> Result<Vec<(Id<GuildMarker>, Watch)>, storage::Error> {
+            Err(disk_full())
+        }
+
+        fn add_watch(
+            &self,
+            _: Id<GuildMarker>,
+            _: &Watch,
+            _: &Seen,
+        ) -> Result<Watched, storage::Error> {
+            Err(disk_full())
+        }
+
+        fn remove_watch(&self, _: Id<GuildMarker>, _: &str) -> Result<bool, storage::Error> {
+            Err(disk_full())
+        }
+
+        fn swap_commit(&self, _: &str, _: &str, _: &str) -> Result<Option<String>, storage::Error> {
+            Err(disk_full())
+        }
+
+        fn swap_release(&self, _: &str, _: u64) -> Result<Option<u64>, storage::Error> {
+            Err(disk_full())
+        }
+    }
+
     /// PuppyBot on the server [`GUILD`], with `store`, and an API that fails every request,
     /// as nothing listens on its port. The client starts its rate limiter in the runtime, as
     /// `Discord::new` does, so this must run in one.
@@ -843,6 +1275,9 @@ mod tests {
             // Every die at its most.
             die: Some,
             games: RefCell::new(BTreeMap::new()),
+            github: Github::new("http://127.0.0.1:1", None, github::TIMEOUT).unwrap(),
+            interval: Duration::from_secs(300),
+            public: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -1341,6 +1776,374 @@ mod tests {
             QuoteText::AlreadySaved { number: 3 }
         );
         assert_eq!(saved_text(Saved::Full), QuoteText::Full);
+    }
+
+    /// PuppyBot with `store`, and `fake` as GitHub.
+    fn with_github(fake: &FakeGithub, store: Box<dyn Store>) -> Bot {
+        let mut bot = bot(store);
+        bot.github = Github::new(&fake.url, None, github::TIMEOUT).unwrap();
+        bot
+    }
+
+    /// The path of the commits of `branch` of `repo` on GitHub.
+    fn commits(repo: &str, branch: &str) -> String {
+        format!("/repos/{repo}/commits?sha={branch}&per_page=30")
+    }
+
+    /// The path of the releases of `repo` on GitHub.
+    fn releases(repo: &str) -> String {
+        format!("/repos/{repo}/releases?per_page=10")
+    }
+
+    #[test]
+    fn adding_repositories_of_github() {
+        in_runtime(async {
+            let fake = FakeGithub::start().await;
+            let bot = with_github(&fake, Box::new(Storage::in_memory()));
+            let guild = Id::new(GUILD);
+            let add = |repo, branch, releases| Request::GithubAdd {
+                guild,
+                repo,
+                channel: Id::new(4),
+                branch,
+                releases,
+            };
+            fake.answer("/repos/a/b", 200, &[], &repo_json("a/b", false));
+            fake.answer(
+                &commits("a/b", "main"),
+                200,
+                &[],
+                &commits_json(&[("abcdef0", "Wuff")]),
+            );
+            fake.answer(&releases("a/b"), 200, &[], &releases_json(&[(7, "v1")]));
+            fake.answer(&commits("a/b", "dev"), 500, &[], "");
+            fake.answer("/repos/a/secret", 200, &[], &repo_json("a/secret", true));
+            fake.answer("/repos/a/broken", 500, &[], "");
+            fake.answer("/repos/a/c", 200, &[], &repo_json("a/c", false));
+            fake.answer(&commits("a/c", "main"), 200, &[], "[]");
+            fake.answer(&releases("a/c"), 500, &[], "");
+            let added = |repo, releases| GithubText::Added {
+                repo,
+                branch: "main",
+                channel: "<#4>",
+                releases,
+            };
+            let asked = [
+                (add("not a repository", None, true), GithubText::InvalidRepo),
+                (add("a/b", Some("-x"), true), GithubText::InvalidBranch),
+                (
+                    add("a/missing", None, true),
+                    GithubText::NoSuchRepo { repo: "a/missing" },
+                ),
+                (
+                    add("a/secret", None, true),
+                    GithubText::NoSuchRepo { repo: "a/secret" },
+                ),
+                (add("a/broken", None, true), GithubText::GithubFailed),
+                (
+                    add("a/b", Some("next"), true),
+                    GithubText::NoSuchBranch {
+                        repo: "a/b",
+                        branch: "next",
+                    },
+                ),
+                (add("a/b", Some("dev"), true), GithubText::GithubFailed),
+                (add("a/c", None, true), GithubText::GithubFailed),
+                // A branch without commits yet.
+                (add("a/c", None, false), added("a/c", false)),
+                (
+                    add("https://github.com/a/b", None, true),
+                    added("a/b", true),
+                ),
+                // Again, in the same channel.
+                (add("a/b", None, true), added("a/b", true)),
+            ];
+            for (request, text) in asked {
+                let said = said(bot.execute(request.clone(), Lang::En, None).await);
+                assert_eq!(
+                    said,
+                    (text.render(Lang::En), Audience::Asker),
+                    "{request:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn listing_and_removing_repositories_of_github() {
+        in_runtime(async {
+            let fake = FakeGithub::start().await;
+            let bot = with_github(&fake, Box::new(Storage::in_memory()));
+            let guild = Id::new(GUILD);
+            let add = |repo, releases| Request::GithubAdd {
+                guild,
+                repo,
+                channel: Id::new(4),
+                branch: None,
+                releases,
+            };
+            fake.answer("/repos/a/b", 200, &[], &repo_json("a/b", false));
+            fake.answer(
+                &commits("a/b", "main"),
+                200,
+                &[],
+                &commits_json(&[("abcdef0", "Wuff")]),
+            );
+            fake.answer(&releases("a/b"), 200, &[], &releases_json(&[(7, "v1")]));
+            fake.answer("/repos/a/c", 200, &[], &repo_json("a/c", false));
+            fake.answer(&commits("a/c", "main"), 200, &[], "[]");
+            for request in [add("https://github.com/a/b", true), add("a/c", false)] {
+                bot.execute(request, Lang::En, None).await;
+            }
+            // What there was then.
+            let noted = bot.store.swap_commit("a/b", "main", "abcdef0").unwrap();
+            assert_eq!(noted.as_deref(), Some("abcdef0"));
+            assert_eq!(bot.store.swap_release("a/b", 7).unwrap(), Some(7));
+            assert_eq!(bot.store.swap_release("a/c", 1).unwrap(), None);
+
+            // The list.
+            let shown = [
+                Shown {
+                    repo: "a/b",
+                    branch: "main",
+                    channel: "<#4>",
+                    releases: true,
+                },
+                Shown {
+                    repo: "a/c",
+                    branch: "main",
+                    channel: "<#4>",
+                    releases: false,
+                },
+            ];
+            let list = said(
+                bot.execute(Request::GithubList(guild), Lang::De, None)
+                    .await,
+            );
+            assert_eq!(list.0, GithubText::Watched(&shown).render(Lang::De));
+
+            // Up to 10 on a server.
+            for n in 0..8 {
+                let repo = format!("a/r{n}");
+                fake.answer(
+                    &format!("/repos/{repo}"),
+                    200,
+                    &[],
+                    &repo_json(&repo, false),
+                );
+                fake.answer(&commits(&repo, "main"), 200, &[], "[]");
+                let request = Request::GithubAdd {
+                    guild,
+                    repo: &repo,
+                    channel: Id::new(4),
+                    branch: None,
+                    releases: false,
+                };
+                let text = GithubText::Added {
+                    repo: &repo,
+                    branch: "main",
+                    channel: "<#4>",
+                    releases: false,
+                };
+                let said = said(bot.execute(request, Lang::En, None).await);
+                assert_eq!(said.0, text.render(Lang::En));
+            }
+            fake.answer("/repos/a/d", 200, &[], &repo_json("a/d", false));
+            fake.answer(&commits("a/d", "main"), 200, &[], "[]");
+            let full = said(bot.execute(add("a/d", false), Lang::En, None).await);
+            assert_eq!(full.0, GithubText::Full.render(Lang::En));
+
+            // Removing, in any case.
+            let asked = [
+                (
+                    Request::GithubRemove(guild, "A/B"),
+                    GithubText::Removed { repo: "A/B" },
+                ),
+                (
+                    Request::GithubRemove(guild, "a/b"),
+                    GithubText::NotWatched { repo: "a/b" },
+                ),
+                (Request::GithubRemove(guild, "?"), GithubText::InvalidRepo),
+            ];
+            for (request, text) in asked {
+                let said = said(bot.execute(request.clone(), Lang::En, None).await);
+                assert_eq!(said.0, text.render(Lang::En), "{request:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn repositories_of_github_that_fail() {
+        in_runtime(async {
+            let fake = FakeGithub::start().await;
+            let bot = with_github(&fake, Box::new(Broken));
+            let guild = Id::new(GUILD);
+            fake.answer("/repos/a/b", 200, &[], &repo_json("a/b", false));
+            fake.answer(
+                &commits("a/b", "main"),
+                200,
+                &[],
+                &commits_json(&[("bbbbbbb", "Wau")]),
+            );
+            fake.answer(&releases("a/b"), 200, &[], &releases_json(&[(8, "v2")]));
+            let add = Request::GithubAdd {
+                guild,
+                repo: "a/b",
+                channel: Id::new(4),
+                branch: None,
+                releases: false,
+            };
+            for request in [
+                add,
+                Request::GithubRemove(guild, "a/b"),
+                Request::GithubList(guild),
+            ] {
+                assert_eq!(
+                    said(bot.execute(request.clone(), Lang::De, None).await),
+                    (Text::StorageFailed.render(Lang::De), Audience::Asker),
+                    "{request:?}"
+                );
+            }
+            // Checks: warnings in the log, and nothing is announced.
+            assert_eq!(bot.github_round().await, 0);
+            let watch = Watch {
+                repo: "a/b".to_owned(),
+                branch: "main".to_owned(),
+                channel: 4,
+                releases: true,
+            };
+            assert_eq!(bot.check_github(&[(guild, watch)]).await, 3);
+        });
+    }
+
+    #[test]
+    fn checks_of_github() {
+        in_runtime(async {
+            let fake = FakeGithub::start().await;
+            let bot = with_github(&fake, Box::new(Storage::in_memory()));
+            let guild = Id::new(GUILD);
+            let watch = |repo: &str, releases| Watch {
+                repo: repo.to_owned(),
+                branch: "main".to_owned(),
+                channel: 4,
+                releases,
+            };
+            let seen = Seen {
+                commit: Some("aaaaaaa".to_owned()),
+                release: Some(7),
+            };
+            for (repo, seen) in [
+                ("a/b", &seen),
+                ("a/new", &Seen::default()),
+                ("a/secret", &seen),
+                ("a/down", &seen),
+                ("a/empty", &seen),
+            ] {
+                bot.store
+                    .add_watch(guild, &watch(repo, true), seen)
+                    .unwrap();
+            }
+            // Of no channel, which Discord doesn't send: none.
+            let nowhere = Watch {
+                channel: 0,
+                ..watch("a/b", false)
+            };
+            for repo in ["a/b", "a/new", "a/down", "a/empty"] {
+                fake.answer(&format!("/repos/{repo}"), 200, &[], &repo_json(repo, false));
+            }
+            fake.answer("/repos/a/secret", 200, &[], &repo_json("a/secret", true));
+            let newer = commits_json(&[
+                ("ccccccc", "Third"),
+                ("bbbbbbb", "Second"),
+                ("aaaaaaa", "First"),
+            ]);
+            fake.answer(&commits("a/b", "main"), 200, &[("etag", "\"1\"")], &newer);
+            fake.answer(
+                &releases("a/b"),
+                200,
+                &[("etag", "\"2\"")],
+                &releases_json(&[(9, "v3"), (8, "v2"), (7, "v1")]),
+            );
+            fake.answer(
+                &commits("a/new", "main"),
+                200,
+                &[],
+                &commits_json(&[("ddddddd", "New")]),
+            );
+            fake.answer(&releases("a/new"), 200, &[], "[]");
+            fake.answer(&commits("a/down", "main"), 500, &[], "");
+            fake.answer(&releases("a/down"), 500, &[], "");
+            fake.answer(&commits("a/empty", "main"), 200, &[], "[]");
+            fake.answer(&releases("a/empty"), 200, &[], &releases_json(&[(7, "v1")]));
+            let mut watches = bot.store.watches(None).unwrap();
+            watches.push((guild, nowhere));
+            // The repositories, their branches, and their releases.
+            assert_eq!(bot.check_github(&watches).await, 15);
+
+            // The newest, now, of the public ones; the first check of one only notes it.
+            let swap = |repo, sha| bot.store.swap_commit(repo, "main", sha).unwrap();
+            assert_eq!(swap("a/b", "ccccccc").as_deref(), Some("ccccccc"));
+            assert_eq!(bot.store.swap_release("a/b", 9).unwrap(), Some(9));
+            assert_eq!(swap("a/new", "ddddddd").as_deref(), Some("ddddddd"));
+            assert_eq!(bot.store.swap_release("a/new", 0).unwrap(), Some(0));
+            assert_eq!(swap("a/secret", "aaaaaaa").as_deref(), Some("aaaaaaa"));
+            assert_eq!(swap("a/down", "aaaaaaa").as_deref(), Some("aaaaaaa"));
+
+            // Again: GitHub says "not modified", or the same, and whether a repository is
+            // public comes from the last hour.
+            let asked = fake.got().len();
+            fake.answer(
+                &commits("a/new", "main"),
+                200,
+                &[],
+                &commits_json(&[("ddddddd", "New")]),
+            );
+            assert_eq!(bot.github_round().await, 15);
+            let paths: Vec<String> = fake
+                .got()
+                .into_iter()
+                .skip(asked)
+                .map(|got| got.path)
+                .collect();
+            assert!(!paths.iter().any(|path| path == "/repos/a/b"), "{paths:?}");
+
+            // When GitHub doesn't answer, the last answer counts; at first, it is no.
+            let stale = Instant::now().checked_sub(PUBLIC_FOR * 2).unwrap();
+            bot.public
+                .borrow_mut()
+                .insert("a/b".to_owned(), (stale, true));
+            bot.public
+                .borrow_mut()
+                .insert("a/down".to_owned(), (stale, false));
+            fake.answer("/repos/a/b", 500, &[], "");
+            fake.answer("/repos/a/down", 500, &[], "");
+            assert!(bot.is_public("a/b").await);
+            assert!(!bot.is_public("a/down").await);
+            assert!(!bot.is_public("a/missing").await);
+
+            // Again and again, until the test stops.
+            let watching = tokio::time::timeout(Duration::from_millis(200), bot.watch_github());
+            assert!(watching.await.is_err());
+        });
+    }
+
+    #[test]
+    fn announcements() {
+        in_runtime(async {
+            let fake = FakeGithub::start().await;
+            let mut bot = bot(Box::new(Storage::in_memory()));
+            // As Discord's API, which takes the message.
+            bot.http = Client::builder()
+                .token("token".to_owned())
+                .proxy(fake.url.trim_start_matches("http://").to_owned(), true)
+                .build();
+            fake.answer("/api/v10/channels/4/messages", 200, &[], "{}");
+            bot.announce(Id::new(4), "Wuff").await;
+            let got = fake.got();
+            assert_eq!(got[0].path, "/api/v10/channels/4/messages");
+            // And one that fails: a warning in the log.
+            bot.announce(Id::new(5), "Wuff").await;
+        });
     }
 
     #[test]

@@ -1,0 +1,56 @@
+[
+ {
+  "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "node_id": "C_x",
+  "commit": {
+   "author": {
+    "name": "Rex",
+    "email": "rex@example.com",
+    "date": "2026-11-08T12:00:00Z"
+   },
+   "committer": {
+    "name": "Rex",
+    "email": "rex@example.com",
+    "date": "2026-11-08T12:00:00Z"
+   },
+   "message": "**Show** quotes <@1>\n\nWith a link: [x](https://example.com)",
+   "comment_count": 0
+  },
+  "html_url": "https://github.com/PurplePuppyProject/PuppyBot/commit/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "author": {
+   "login": "rex",
+   "id": 1,
+   "type": "User",
+   "site_admin": false
+  },
+  "committer": {
+   "login": "rex",
+   "id": 1,
+   "type": "User",
+   "site_admin": false
+  },
+  "parents": []
+ },
+ {
+  "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "node_id": "C_x",
+  "commit": {
+   "author": {
+    "name": "Rex",
+    "email": "rex@example.com",
+    "date": "2026-11-08T12:00:00Z"
+   },
+   "committer": {
+    "name": "Rex",
+    "email": "rex@example.com",
+    "date": "2026-11-08T12:00:00Z"
+   },
+   "message": "Roll dice",
+   "comment_count": 0
+  },
+  "html_url": "https://github.com/PurplePuppyProject/PuppyBot/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "author": null,
+  "committer": null,
+  "parents": []
+ }
+]

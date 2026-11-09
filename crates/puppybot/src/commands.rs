@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use puppybot_core::dice::{self, Dice};
 use puppybot_core::games::{GameText, Guessing, Hand};
+use puppybot_core::github::{GithubText, MAX_BRANCH};
 use puppybot_core::i18n::Lang;
 use puppybot_core::poll::{self, Poll};
 use puppybot_core::quotes::QuoteText;
@@ -17,15 +18,19 @@ use twilight_model::application::interaction::application_command::{
 use twilight_model::application::interaction::{
     Interaction, InteractionContextType, InteractionData, InteractionType,
 };
+use twilight_model::channel::ChannelType;
 use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
 use twilight_model::channel::message::{AllowedMentions, Component, MessageFlags};
 use twilight_model::guild::Permissions;
-use twilight_model::http::interaction::{InteractionResponse, InteractionResponseType};
+use twilight_model::http::interaction::{
+    InteractionResponse, InteractionResponseData, InteractionResponseType,
+};
 use twilight_model::id::Id;
-use twilight_model::id::marker::GuildMarker;
+use twilight_model::id::marker::{ChannelMarker, GuildMarker};
 use twilight_model::util::Timestamp;
 use twilight_util::builder::command::{
-    BooleanBuilder, CommandBuilder, IntegerBuilder, StringBuilder, SubCommandBuilder, UserBuilder,
+    BooleanBuilder, ChannelBuilder, CommandBuilder, IntegerBuilder, StringBuilder,
+    SubCommandBuilder, UserBuilder,
 };
 use twilight_util::builder::interaction_response::ChannelMessageBuilder;
 
@@ -137,7 +142,59 @@ pub fn commands() -> Vec<Command> {
             .build(),
         save_quote(),
         quote(),
+        github(),
     ]
+}
+
+/// /github, for people who may manage the server, as /settings: add a repository, with its
+/// channel, a branch and whether its releases are announced, too; remove one; and list them.
+fn github() -> Command {
+    let text = |text: GithubText<'_>| (text.render(Lang::En), text.render(Lang::De));
+    let repo = || {
+        let (english, german) = text(GithubText::RepoDescription);
+        StringBuilder::new("repo", english)
+            .description_localizations([(GERMAN, german)])
+            .required(true)
+            .max_length(200)
+    };
+    let subcommand = |name: &str, german_name: &str, description| {
+        let (english, german) = text(description);
+        SubCommandBuilder::new(name, english)
+            .name_localizations([(GERMAN, german_name)])
+            .description_localizations([(GERMAN, german)])
+    };
+    let (channel, german_channel) = text(GithubText::ChannelDescription);
+    let (branch, german_branch) = text(GithubText::BranchDescription);
+    let (releases, german_releases) = text(GithubText::ReleasesDescription);
+    let add = subcommand("add", "hinzufügen", GithubText::AddDescription)
+        .option(repo())
+        .option(
+            ChannelBuilder::new("channel", channel)
+                .name_localizations([(GERMAN, "kanal")])
+                .description_localizations([(GERMAN, german_channel)])
+                .required(true)
+                .channel_types([ChannelType::GuildText, ChannelType::GuildAnnouncement]),
+        )
+        .option(
+            StringBuilder::new("branch", branch)
+                .description_localizations([(GERMAN, german_branch)])
+                .max_length(u16::try_from(MAX_BRANCH).unwrap_or(u16::MAX)),
+        )
+        .option(
+            BooleanBuilder::new("releases", releases)
+                .description_localizations([(GERMAN, german_releases)]),
+        );
+    let remove = subcommand("remove", "entfernen", GithubText::RemoveDescription).option(repo());
+    let list = subcommand("list", "liste", GithubText::ListDescription);
+    let (description, german) = text(GithubText::GithubDescription);
+    CommandBuilder::new("github", description, CommandType::ChatInput)
+        .description_localizations([(GERMAN, german)])
+        .contexts([InteractionContextType::Guild])
+        .default_member_permissions(MAY_CHANGE_SETTINGS)
+        .option(add)
+        .option(remove)
+        .option(list)
+        .build()
 }
 
 /// The name of the command in the menu of messages, under Apps, that saves one as a quote.
@@ -342,6 +399,23 @@ pub enum Request<'a> {
         /// Whether they may manage messages, and so delete any quote.
         may_manage: bool,
     },
+    /// Announcing a repository of GitHub on the server: /github add.
+    GithubAdd {
+        /// The server.
+        guild: Id<GuildMarker>,
+        /// The repository, as the person wrote it.
+        repo: &'a str,
+        /// The channel of the announcements.
+        channel: Id<ChannelMarker>,
+        /// The branch, none for the default branch.
+        branch: Option<&'a str>,
+        /// Whether its releases are announced, too.
+        releases: bool,
+    },
+    /// No longer announcing a repository, as the person wrote it, on the server: /github remove.
+    GithubRemove(Id<GuildMarker>, &'a str),
+    /// The repositories that the server announces: /github list.
+    GithubList(Id<GuildMarker>),
     /// A roll of `dice`, which only the asker sees if it is `secret`: /dice.
     Roll {
         /// What to roll.
@@ -436,7 +510,7 @@ fn slash<'a>(
         "server" => Request::ServerInfo(guild),
         "user" => user_info(interaction, command),
         "coin" => Request::Coin,
-        "8ball" => Request::EightBall(string(command, "question").unwrap_or_default()),
+        "8ball" => Request::EightBall(string(&command.options, "question").unwrap_or_default()),
         "rps" => Request::RpsChoose,
         "guess" => Request::Guess {
             number: number(&command.options, "number"),
@@ -445,19 +519,18 @@ fn slash<'a>(
         },
         SAVE_QUOTE => quote_to_save(command, guild),
         "quote" => quote_request(interaction, command, guild),
+        "github" if may(interaction, MAY_CHANGE_SETTINGS) => github_request(command, guild),
+        "github" => Request::Answer(Text::NotAllowed),
         _ => Request::Answer(Text::UnknownCommand),
     }
 }
 
-/// The text of the option `name` of `command`, none if it has none.
-fn string<'a>(command: &'a CommandData, name: &str) -> Option<&'a str> {
-    command
-        .options
-        .iter()
-        .find_map(|option| match &option.value {
-            CommandOptionValue::String(text) if option.name == name => Some(text.as_str()),
-            _ => None,
-        })
+/// The text of the option `name` among `options`, none if there is none.
+fn string<'a>(options: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
+    options.iter().find_map(|option| match &option.value {
+        CommandOptionValue::String(text) if option.name == name => Some(text.as_str()),
+        _ => None,
+    })
 }
 
 /// The whole number of the option `name` among `options`, none if there is none, or a negative
@@ -500,6 +573,41 @@ fn quote_to_save(command: &CommandData, guild: Id<GuildMarker>) -> Request<'stat
         }
     });
     Request::SaveQuote(guild, quote)
+}
+
+/// /github on `guild`: add, with the repository and the channel, and maybe a branch and whether
+/// the releases are announced, too, by default they are; remove, with the repository; and
+/// list. Any other shape is of another version of the command.
+fn github_request(command: &CommandData, guild: Id<GuildMarker>) -> Request<'_> {
+    let [
+        CommandDataOption {
+            name,
+            value: CommandOptionValue::SubCommand(options),
+        },
+    ] = command.options.as_slice()
+    else {
+        return Request::Answer(Text::UnknownCommand);
+    };
+    let channel = options.iter().find_map(|option| match option.value {
+        CommandOptionValue::Channel(channel) if option.name == "channel" => Some(channel),
+        _ => None,
+    });
+    let releases = options.iter().find_map(|option| match option.value {
+        CommandOptionValue::Boolean(releases) if option.name == "releases" => Some(releases),
+        _ => None,
+    });
+    match (name.as_str(), string(options, "repo"), channel) {
+        ("add", Some(repo), Some(channel)) => Request::GithubAdd {
+            guild,
+            repo,
+            channel,
+            branch: string(options, "branch"),
+            releases: releases.unwrap_or(true),
+        },
+        ("remove", Some(repo), _) => Request::GithubRemove(guild, repo),
+        ("list", _, _) => Request::GithubList(guild),
+        _ => Request::Answer(Text::UnknownCommand),
+    }
 }
 
 /// /quote on `guild`: show, with the number of a quote or without, and delete, with it. Any
@@ -692,6 +800,19 @@ pub fn response(answer: Answer) -> InteractionResponse {
         response.kind = InteractionResponseType::UpdateMessage;
     }
     response
+}
+
+/// The first response to a command that takes longer than Discord waits, 3 seconds: that
+/// PuppyBot is working on it, which only the person who asked sees. The answer follows.
+#[must_use]
+pub fn working() -> InteractionResponse {
+    InteractionResponse {
+        kind: InteractionResponseType::DeferredChannelMessageWithSource,
+        data: Some(InteractionResponseData {
+            flags: Some(MessageFlags::EPHEMERAL),
+            ..InteractionResponseData::default()
+        }),
+    }
 }
 
 /// A row of buttons with these IDs and labels, none if there are none.
@@ -1343,7 +1464,7 @@ pub(crate) mod tests {
             names,
             [
                 "info", "settings", "dice", "poll", "server", "user", "coin", "8ball", "rps",
-                "guess", SAVE_QUOTE, "quote"
+                "guess", SAVE_QUOTE, "quote", "github"
             ]
         );
         for command in &commands {
@@ -1516,6 +1637,86 @@ pub(crate) mod tests {
                 "{options}"
             );
         }
+    }
+
+    #[test]
+    fn github() {
+        let working = working();
+        assert_eq!(
+            working.kind,
+            InteractionResponseType::DeferredChannelMessageWithSource
+        );
+        assert_eq!(
+            working.data.and_then(|data| data.flags),
+            Some(MessageFlags::EPHEMERAL)
+        );
+        let guild = Id::new(GUILD);
+        let subcommand = |name: &str, options: &str| {
+            format!(r#"[{{"name": "{name}", "type": 1, "options": {options}}}]"#)
+        };
+        let add = |options: &str| subcommand("add", options);
+        let full = add(r#"[{"name": "repo", "type": 3, "value": "a/b"},
+            {"name": "channel", "type": 7, "value": "1300000000000000004"},
+            {"name": "branch", "type": 3, "value": "dev"},
+            {"name": "releases", "type": 5, "value": false}]"#);
+        let interaction = command("github", &full, "de", MANAGE_GUILD);
+        assert_eq!(
+            asked(&interaction).0,
+            Request::GithubAdd {
+                guild,
+                repo: "a/b",
+                channel: Id::new(1_300_000_000_000_000_004),
+                branch: Some("dev"),
+                releases: false,
+            }
+        );
+        // Without a branch, and with the releases.
+        let short = add(
+            r#"[{"name": "channel", "type": 7, "value": "1300000000000000004"},
+            {"name": "repo", "type": 3, "value": "a/b"}]"#,
+        );
+        let interaction = command("github", &short, "de", MANAGE_GUILD);
+        assert_eq!(
+            asked(&interaction).0,
+            Request::GithubAdd {
+                guild,
+                repo: "a/b",
+                channel: Id::new(1_300_000_000_000_000_004),
+                branch: None,
+                releases: true,
+            }
+        );
+        let remove = subcommand("remove", r#"[{"name": "repo", "type": 3, "value": "a/b"}]"#);
+        let interaction = command("github", &remove, "de", MANAGE_GUILD);
+        assert_eq!(asked(&interaction).0, Request::GithubRemove(guild, "a/b"));
+        let list = subcommand("list", "[]");
+        let interaction = command("github", &list, "de", MANAGE_GUILD);
+        assert_eq!(asked(&interaction).0, Request::GithubList(guild));
+        // Only for people who may manage the server, and only as Discord knows it.
+        let interaction = command("github", &list, "de", 0);
+        assert_eq!(asked(&interaction).0, Request::Answer(Text::NotAllowed));
+        let without_channel = add(r#"[{"name": "repo", "type": 3, "value": "a/b"}]"#);
+        for options in ["[]".to_owned(), without_channel, subcommand("remove", "[]")] {
+            let interaction = command("github", &options, "de", MANAGE_GUILD);
+            assert_eq!(
+                asked(&interaction).0,
+                Request::Answer(Text::UnknownCommand),
+                "{options}"
+            );
+        }
+        // The command, for people who may manage the server.
+        let commands = commands();
+        let github = &commands[12];
+        assert_eq!(
+            github.default_member_permissions,
+            Some(Permissions::MANAGE_GUILD)
+        );
+        let names: Vec<_> = github
+            .options
+            .iter()
+            .map(|subcommand| subcommand.name.as_str())
+            .collect();
+        assert_eq!(names, ["add", "remove", "list"]);
     }
 
     /// As Discord takes them, which the fake Discord of the tests doesn't check: names,

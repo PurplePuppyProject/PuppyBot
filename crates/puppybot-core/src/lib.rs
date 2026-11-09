@@ -8,6 +8,7 @@
 
 pub mod dice;
 pub mod games;
+pub mod github;
 pub mod i18n;
 pub mod poll;
 pub mod quotes;

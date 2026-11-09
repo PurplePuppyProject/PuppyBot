@@ -24,3 +24,13 @@ path = "/var/lib/puppybot/puppybot.redb"
 level = "info"
 # text, a line per message, or json, a JSON object per line, for log collectors.
 format = "text"
+
+# The table [github] may be left out, for these defaults.
+[github]
+# A file with a token for GitHub's API, e.g. a second secret in compose.yaml. Without one,
+# GitHub allows 60 requests an hour, and PuppyBot checks less often when servers announce more
+# than about four repositories; with one, 5000. A fine-grained token with access to public
+# repositories only, read-only, and no permissions, is enough.
+# token-file = "/run/secrets/github_token"
+# How many seconds PuppyBot waits between its checks of GitHub, at least 60.
+interval = 300

@@ -38,6 +38,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "github_api"
+path = "fuzz_targets/github_api.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "interaction"
 path = "fuzz_targets/interaction.rs"
 test = false

@@ -6,7 +6,7 @@
 
 A Discord bot of the Purple Puppy Project, written in Rust; a Signal bot may follow.
 
-**Status: being built.** So far PuppyBot connects to Discord, works only on the servers that its [configuration](#configuration) names, answers [`/info`](#commands), rolls [dice](#dice), posts [polls](#polls), shows since when the server and people are there, plays [games](#games), keeps [quotes](#quotes), and answers text commands such as `!info`, in German or English, and keeps the language and the prefix of each server in its database. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
+**Status: being built.** So far PuppyBot connects to Discord, works only on the servers that its [configuration](#configuration) names, answers [`/info`](#commands), rolls [dice](#dice), posts [polls](#polls), shows since when the server and people are there, plays [games](#games), keeps [quotes](#quotes), announces new commits and releases of [GitHub](#github) repositories, and answers text commands such as `!info`, in German or English, and keeps the language and the prefix of each server in its database. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
 
 The project holds itself to:
 
@@ -43,6 +43,8 @@ PuppyBot registers its commands only on the servers in `guilds`, and leaves any 
 | Save quote, in German Zitat speichern, in the menu of a message, under Apps | Saves the message as a [quote](#quotes) of the server |
 | `/quote show`, in German `/zitat zeigen` | Shows the quote `number` of the server, or one at random |
 | `/quote delete`, in German `/zitat löschen` | Deletes the quote `number`: for the person quoted, and for people who may manage messages |
+| `/github add`, in German `/github hinzufügen` | Announces new commits and releases of a public repository of [GitHub](#github) in a channel. Only for people who may manage the server |
+| `/github remove`, `/github list`, in German `entfernen`, `liste` | Stops announcing a repository, or shows which the server announces. Only for people who may manage the server |
 | `/settings prefix` | Shows the prefix of the text commands on the server, or changes it with `to`: 1 to 5 characters of ASCII that one can see, but no spaces and none of `` < > @ # : / ` ``, by default `!`. Only for people who may manage the server |
 
 PuppyBot's answers are shown only to the person who asked, except those of `/dice`, of the games and of `/quote show`, which everyone in the channel sees, and mention nobody. Names and what else people wrote appear as they are, not as Markdown, links or mentions. Dates are Discord's timestamps, which Discord shows in the language and time zone of each reader. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
@@ -107,6 +109,17 @@ Anyone on the server can save a message as a quote, in the menu of the message: 
 - `/quote show` and `!quote` show a quote for everyone in the channel: the one with the number, or one at random. It appears as it was written, without Markdown, mentions or links, with the date of the message and a link to it.
 - `/quote delete` deletes a quote, for the person quoted and for people who may manage messages in the channel.
 - When the message is deleted, PuppyBot deletes its quote, too. A message is a quote only once.
+
+### GitHub
+
+People who may manage the server choose which public repositories of GitHub PuppyBot announces, and where: `/github add repo: owner/name channel: #news`, with `branch` for a branch other than the default one, and `releases: False` for the commits only. A server announces up to 10 repositories; `/github list` shows them, and `/github remove repo: owner/name` stops one, on all its branches.
+
+- **Commits:** PuppyBot checks GitHub about every 5 minutes, see `[github]` `interval`, and posts the new commits of a check in one message: up to 10, each with its short hash as a link, its title and its author, then "and N more". After a force push, the newest. **Releases** come with their tag, name and link.
+- The messages are in the language of the server and mention nobody; titles, names and tags appear as they are, not as Markdown.
+- **What there is** when someone adds a repository isn't announced, only what comes later. After a restart, PuppyBot announces what came meanwhile.
+- **Only public repositories:** PuppyBot checks with GitHub when someone adds one, and every hour after. One that became private isn't announced any more, and the log says so.
+- **A token for GitHub's API is optional.** Without one, GitHub allows 60 requests an hour, which serve about four repositories every 5 minutes; with more, PuppyBot checks less often. With a token, it is 5000. A fine-grained token is enough, which can read nothing private: on github.com, Settings, Developer settings, Personal access tokens, Fine-grained tokens, with the repository access "Public repositories" and no permissions. Save it in a file, e.g. a second secret of Compose, and name the file in `[github]` `token-file`.
+- PuppyBot keeps no port open for GitHub: it asks, GitHub doesn't call it. It speaks only to `https://api.github.com`.
 
 ## Docker
 
@@ -175,10 +188,13 @@ PuppyBot reads its settings from a [TOML](https://toml.io) file: `/etc/puppybot/
 | `[storage]` `path` | `/var/lib/puppybot/puppybot.redb` | The file of the database, with the settings and the quotes of the servers, which PuppyBot creates if it is missing. It must be on a disk of this machine, and only one PuppyBot at a time can use it. |
 | `[log]` `level` | `info` | The most detailed level that is logged: `error`, `warn`, `info`, `debug` or `trace` |
 | `[log]` `format` | `text` | `text`, a line per message, or `json`, a JSON object per line, for log collectors |
+| `[github]` `token-file` | none | A file with a token for GitHub's API, e.g. a Docker secret: optional, see [GitHub](#github) |
+| `[github]` `interval` | `300` | How many seconds PuppyBot waits between its checks of GitHub, at least 60. Without a token, longer, when servers announce more repositories |
+| `[github]` `api-url` | GitHub's | For tests only: GitHub's API on this machine (`http://`), e.g. `http://127.0.0.1:8080`, which allows any interval. Other addresses are errors, as for Discord. |
 
 - **Checked:** unknown keys, e.g. typos, and invalid values are errors: PuppyBot names the line and exits with the status 2.
 - **Paths:** a relative path, e.g. `token-file = "token"`, is relative to the directory of the configuration file.
-- **Secrets** come only from files that the configuration names, never from the configuration itself, the command line or environment variables, and are never logged. The token file holds the token, with line breaks at its end or without; a character that isn't printable ASCII, e.g. a space, or a file larger than 4 KiB is an error. PuppyBot warns if users other than its owner may read or change the file.
+- **Secrets** come only from files that the configuration names, never from the configuration itself, the command line or environment variables, and are never logged. A token file holds the token, with line breaks at its end or without; a character that isn't printable ASCII, e.g. a space, or a file larger than 4 KiB is an error. PuppyBot warns if users other than its owner may read or change the file.
 - **`RUST_LOG`**, e.g. `RUST_LOG=debug` or `RUST_LOG=info,puppybot=trace`, takes precedence over `[log]` `level`, to find a bug.
 
 ## Running and Stopping

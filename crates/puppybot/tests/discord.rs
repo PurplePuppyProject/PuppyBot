@@ -13,8 +13,8 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use common::{
-    APPLICATION, BUTTON_ANSWER, CHANNEL, CHANNEL_MESSAGES, COMMAND_ANSWER, FakeDiscord, GUILD,
-    MANAGE_GUILD, MENTION, OTHER_GUILD, Running, Send, TOKEN, button, config, guild_create,
+    APPLICATION, BUTTON_ANSWER, CHANNEL, CHANNEL_MESSAGES, COMMAND_ANSWER, FakeDiscord, FakeGithub,
+    GUILD, MANAGE_GUILD, MENTION, OTHER_GUILD, Running, Send, TOKEN, button, config, guild_create,
     interaction, message, message_delete, ready, save_quote, settings, setup, slash,
 };
 
@@ -141,6 +141,8 @@ fn failing_requests_are_warnings() {
                 interaction(2, "info", "en-US", GUILD),
                 message(1, "!info", GUILD, false),
                 message(2, "!poll Pizza? | Ja | Nein", GUILD, false),
+                // Not even that PuppyBot is working on it.
+                slash("github", &github_add("a/b"), "en-US", MANAGE_GUILD),
             ]
         },
         Some(400),
@@ -830,4 +832,92 @@ fn quotes_saved_shown_and_deleted() {
     ] {
         assert!(log.contains(part), "{part}: {log}");
     }
+}
+
+/// The options of /github add of `repo`, announced in [`CHANNEL`].
+fn github_add(repo: &str) -> String {
+    format!(
+        r#"[{{"name": "add", "type": 1, "options": [{{"name": "repo", "type": 3, "value": "{repo}"}},
+        {{"name": "channel", "type": 7, "value": "{CHANNEL}"}}]}}]"#
+    )
+}
+
+/// The commits of `a/b` on GitHub, with these hashes and titles, the newest first.
+fn commits(commits: &[(&str, &str)]) -> String {
+    let commits: Vec<String> = commits
+        .iter()
+        .map(|(sha, title)| {
+            format!(
+                r#"{{"sha": "{sha}", "commit": {{"message": "{title}", "author": {{"name": "Rex"}}}}, "author": null}}"#
+            )
+        })
+        .collect();
+    format!("[{}]", commits.join(","))
+}
+
+#[test]
+fn new_commits_of_github() {
+    let github = FakeGithub::start();
+    github.answer(
+        "/repos/a/b",
+        200,
+        r#"{"full_name": "a/b", "private": false, "default_branch": "main"}"#,
+    );
+    let path = "/repos/a/b/commits?sha=main&per_page=30";
+    github.answer(path, 200, &commits(&[("aaaaaaa", "First")]));
+    github.answer("/repos/a/b/releases?per_page=10", 200, "[]");
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                slash("github", &github_add("a/b"), "en-US", MANAGE_GUILD),
+            ]
+        },
+        None,
+    );
+    let extra = format!("[github]\napi-url = \"{}\"\ninterval = 1\n", github.url);
+    let dir = setup(&config(Some(&discord), &extra), Some((TOKEN, 0o600)));
+    let mut bot = Running::start(dir.path(), &[]);
+
+    // First that PuppyBot is working on it, then the answer.
+    let working = discord.wait_for_request(COMMAND_ANSWER);
+    assert!(working.body.contains(r#""type":5"#), "{}", working.body);
+    assert!(working.body.contains(r#""flags":64"#), "{}", working.body);
+    let answer = discord.wait_for_request(&format!(
+        "PATCH /api/v10/webhooks/{APPLICATION}/command-token/messages/@original"
+    ));
+    assert!(
+        answer.body.contains(&format!(
+            "From now on, PuppyBot announces new commits on `main` and releases of **a/b** in <#{CHANNEL}>."
+        )),
+        "{}",
+        answer.body
+    );
+    bot.wait_for("announcing a repository of GitHub");
+
+    // A new commit, in the channel, in the language of the server.
+    github.answer(
+        path,
+        200,
+        &commits(&[("bbbbbbb", "Second"), ("aaaaaaa", "First")]),
+    );
+    let announced = discord.wait_for_request(CHANNEL_MESSAGES);
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert!(
+        announced.body.contains(
+            "**1 new commit** in a/b (`main`):\\n- [`bbbbbbb`](<https://github.com/a/b/commit/bbbbbbb>) Second: Rex"
+        ),
+        "{}",
+        announced.body
+    );
+    assert!(
+        announced
+            .body
+            .contains(r#""allowed_mentions":{"parse":[]}"#),
+        "{}",
+        announced.body
+    );
+    // Without a token, as the configuration names none.
+    assert!(github.got().contains(&path.to_owned()));
 }

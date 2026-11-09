@@ -550,3 +550,76 @@ async fn answer(
         .body(Full::new(Bytes::from(reply)))
         .unwrap())
 }
+
+/// GitHub on this machine: an API that answers each path with what [`FakeGithub::answer`] set
+/// for it, or 404, and records the paths that it got.
+pub struct FakeGithub {
+    runtime: tokio::runtime::Runtime,
+    pub url: String,
+    routes: Arc<Mutex<std::collections::BTreeMap<String, (u16, String)>>>,
+    got: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeGithub {
+    /// Starts it, with no answers yet.
+    pub fn start() -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let routes = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let (server_routes, server_got) = (Arc::clone(&routes), Arc::clone(&got));
+        runtime.spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (routes, got) = (Arc::clone(&server_routes), Arc::clone(&server_got));
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: hyper::Request<Incoming>| {
+                        let path = request.uri().path_and_query().unwrap().to_string();
+                        got.lock().unwrap().push(path.clone());
+                        let (status, body) = routes
+                            .lock()
+                            .unwrap()
+                            .get(&path)
+                            .cloned()
+                            .unwrap_or((404, r#"{"message": "Not Found"}"#.to_owned()));
+                        async move {
+                            Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(status)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(Bytes::from(body)))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        Self {
+            runtime,
+            url,
+            routes,
+            got,
+        }
+    }
+
+    /// From now on, answers `path` with `status` and `body`.
+    pub fn answer(&self, path: &str, status: u16, body: &str) {
+        self.routes
+            .lock()
+            .unwrap()
+            .insert(path.to_owned(), (status, body.to_owned()));
+    }
+
+    /// The paths that it got so far.
+    pub fn got(&self) -> Vec<String> {
+        self.got.lock().unwrap().clone()
+    }
+}

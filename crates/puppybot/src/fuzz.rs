@@ -10,6 +10,9 @@ use std::path::Path;
 
 use puppybot_core::dice::{self, Dice};
 use puppybot_core::games::{Coin, EIGHT_BALL, GameText, Hint};
+use puppybot_core::github::{
+    Commit, GithubText, MAX_BRANCH, MAX_REPOS, Repo, Watch as Shown, is_valid_branch, new_commits,
+};
 use puppybot_core::i18n::Lang;
 use puppybot_core::poll::{self, Poll};
 use puppybot_core::quotes::{self, MAX_QUOTE, QuoteText};
@@ -22,6 +25,7 @@ use twilight_model::id::Id;
 
 use crate::cli;
 use crate::commands::{Answer, Audience, Request};
+use crate::github::{self, OwnedCommit};
 use crate::storage::Quote;
 
 /// The command line, as arguments separated by NUL bytes, which arguments can't hold.
@@ -129,6 +133,9 @@ pub fn interaction(data: &[u8]) {
         Request::SaveQuote(_, quote) => saving(lang, &quote),
         Request::ShowQuote(_, number) => showing(lang, number),
         Request::DeleteQuote { number, .. } => deleting(lang, number),
+        Request::GithubAdd { repo, branch, .. } => adding(lang, repo, branch),
+        Request::GithubRemove(_, repo) => removing(lang, repo),
+        Request::GithubList(_) => listing(lang),
         Request::Coin => games(lang, &COINS),
         Request::EightBall(question) => games(
             lang,
@@ -260,6 +267,81 @@ fn shown(lang: Lang, number: u32, author: &str, text: &str) -> Answer {
     Answer::new(shown.render(lang), Audience::Everyone)
 }
 
+/// What /github add may answer to `repo` and `branch`, as the person wrote them, in `lang`.
+fn adding(lang: Lang, repo: &str, branch: Option<&str>) -> Vec<Answer> {
+    let failed = [
+        GithubText::InvalidRepo,
+        GithubText::InvalidBranch,
+        GithubText::Full,
+        GithubText::GithubFailed,
+    ];
+    let mut answers = github_texts(lang, &failed);
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    if let Some(repo) = Repo::parse(repo) {
+        let repo = repo.to_string();
+        let branch = branch
+            .filter(|branch| is_valid_branch(branch))
+            .unwrap_or("main");
+        let channel = format!("<#{}>", u64::MAX);
+        let added = [
+            GithubText::Added {
+                repo: &repo,
+                branch,
+                channel: &channel,
+                releases: true,
+            },
+            GithubText::NoSuchRepo { repo: &repo },
+            GithubText::NoSuchBranch {
+                repo: &repo,
+                branch,
+            },
+        ];
+        answers.extend(github_texts(lang, &added));
+    }
+    answers
+}
+
+/// What /github remove may answer to `repo`, as the person wrote it, in `lang`.
+fn removing(lang: Lang, repo: &str) -> Vec<Answer> {
+    let mut answers = github_texts(lang, &[GithubText::InvalidRepo]);
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    if let Some(repo) = Repo::parse(repo) {
+        let repo = repo.to_string();
+        let removed = [
+            GithubText::Removed { repo: &repo },
+            GithubText::NotWatched { repo: &repo },
+        ];
+        answers.extend(github_texts(lang, &removed));
+    }
+    answers
+}
+
+/// What /github list may answer, in `lang`: also the longest list.
+fn listing(lang: Lang) -> Vec<Answer> {
+    let repo = format!("{}/{}", "a".repeat(39), "_".repeat(100));
+    let branch = "b".repeat(MAX_BRANCH);
+    let channel = format!("<#{}>", u64::MAX);
+    let watch = Shown {
+        repo: &repo,
+        branch: &branch,
+        channel: &channel,
+        releases: true,
+    };
+    let watches = [watch; MAX_REPOS];
+    let lists = [GithubText::Watched(&[]), GithubText::Watched(&watches)];
+    let mut answers = github_texts(lang, &lists);
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    answers
+}
+
+/// An answer for the person who asked with each of the texts of GitHub, `texts`, in `lang`.
+fn github_texts(lang: Lang, texts: &[GithubText<'_>]) -> Vec<Answer> {
+    texts
+        .iter()
+        .map(|text| Answer::new(text.render(lang), Audience::Asker))
+        .collect()
+}
+
 /// An answer for `audience` with each of the quotes' `texts`, in `lang`.
 fn quote_texts(lang: Lang, texts: &[QuoteText<'_>], audience: Audience) -> Vec<Answer> {
     texts
@@ -321,6 +403,54 @@ fn check(answer: Answer) {
     assert!((1..=2000).contains(&content.chars().count()), "{content}");
     // Not even in the text: what others wrote, e.g. a name, appears as it is.
     assert!(!content.contains("<@"), "{content}");
+}
+
+/// An answer of GitHub's API, as JSON: a repository, commits or releases.
+///
+/// Checks beyond not crashing: a repository's default branch is one that PuppyBot takes, each
+/// commit's hash has 7 to 64 hexadecimal digits, and what PuppyBot would post of the commits and
+/// releases fits into Discord's limit of 2000 characters and mentions nobody.
+///
+/// # Panics
+///
+/// If a check fails, which is what the fuzz target looks for.
+pub fn github_api(data: &[u8]) {
+    if let Some(info) = github::parse_repo(data) {
+        assert!(is_valid_branch(&info.default_branch), "{info:?}");
+    }
+    let mut messages = Vec::new();
+    if let Some(commits) = github::parse_commits(data) {
+        for commit in &commits {
+            let hex = commit.sha.bytes().all(|byte| byte.is_ascii_hexdigit());
+            assert!(hex && (7..=64).contains(&commit.sha.len()), "{commit:?}");
+        }
+        let commits: Vec<Commit<'_>> = commits.iter().map(OwnedCommit::commit).collect();
+        // All of them new, as after a force push.
+        let new = new_commits(&commits, "");
+        for lang in Lang::ALL {
+            let pushed = GithubText::Pushed {
+                repo: "a/b",
+                branch: "main",
+                commits: &new.commits,
+                more: new.more,
+                rewritten: new.rewritten,
+            };
+            messages.push(pushed.render(lang));
+        }
+    }
+    for release in github::parse_releases(data).unwrap_or_default() {
+        for lang in Lang::ALL {
+            let released = GithubText::Released {
+                repo: "a/b",
+                release: release.release(),
+            };
+            messages.push(released.render(lang));
+        }
+    }
+    for message in messages {
+        assert!(message.chars().count() <= 2000, "{message}");
+        assert!(!message.contains("<@"), "{message}");
+    }
 }
 
 /// A poll as a text command writes it: the question and the answers, separated by `|`.
@@ -516,6 +646,21 @@ mod tests {
         ];
         for input in inputs {
             super::interaction(input.as_bytes());
+        }
+    }
+
+    /// The seeds of the fuzz target, in `fuzz/seeds/github_api`, are answers of GitHub.
+    #[test]
+    fn github_api_seeds() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/seeds/github_api");
+        let mut seeds = 0;
+        for entry in fs::read_dir(dir).unwrap() {
+            super::github_api(&fs::read(entry.unwrap().path()).unwrap());
+            seeds += 1;
+        }
+        assert_eq!(seeds, 3);
+        for input in [&b""[..], b"[]", b"{}", b"\xff"] {
+            super::github_api(input);
         }
     }
 

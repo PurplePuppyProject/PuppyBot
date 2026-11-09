@@ -455,6 +455,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "hyper",
+ "hyper-rustls",
  "hyper-util",
  "puppybot-core",
  "redb",
