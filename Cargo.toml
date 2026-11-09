@@ -40,6 +40,7 @@ twilight-gateway = { version = "0.18.0", default-features = false, features = ["
 twilight-http = { version = "0.18.0", default-features = false, features = ["rustls-native-roots"] }
 twilight-model = "0.18.0"
 twilight-util = { version = "0.18.0", features = ["builder"] }
+twilight-validate = "0.18.0"
 # The database: one file, in pure Rust and without dependencies.
 redb = "4.5.0"
 # Random numbers of the system, for dice and games: ring, which TLS uses already.
@@ -47,8 +48,9 @@ ring = { version = "0.17.14", default-features = false }
 # For the tests: Discord on this machine, see crates/puppybot/tests/common.
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 http-body-util = "0.1.5"
-hyper = { version = "1.12.0", features = ["http1", "server"] }
-hyper-util = { version = "0.1.21", features = ["tokio"] }
+hyper = "1.12.0"
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1"] }
+hyper-util = "0.1.21"
 tokio-websockets = { version = "0.13.3", default-features = false, features = ["server", "sha1_smol"] }
 
 [workspace.lints.rust]

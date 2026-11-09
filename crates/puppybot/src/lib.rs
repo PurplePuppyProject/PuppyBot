@@ -12,6 +12,7 @@ use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 pub mod cli;
 pub mod commands;
@@ -20,6 +21,12 @@ pub mod discord;
 pub mod files;
 #[cfg(any(test, fuzzing))]
 pub mod fuzz;
+pub mod github;
+
+/// GitHub on this machine, for the unit tests.
+#[cfg(test)]
+#[path = "../tests/support/fake_github.rs"]
+mod fake_github;
 pub mod logging;
 pub mod random;
 pub mod secret;
@@ -110,8 +117,16 @@ fn serve(config: &config::Config, path: &Path) -> Result<shutdown::Stop, Box<dyn
     runtime.block_on(async move {
         // Caught before saying that PuppyBot started, which tells that it may be stopped.
         let mut signals = shutdown::Signals::new()?;
-        let discord =
-            discord::Discord::new(&config.discord, secrets.discord_token(), Box::new(storage));
+        let api = config.github.api_url.as_deref().unwrap_or(github::API);
+        let github = github::Github::new(api, secrets.github_token().cloned(), github::TIMEOUT)?;
+        let interval = Duration::from_secs(config.github.interval);
+        let discord = discord::Discord::new(
+            &config.discord,
+            secrets.discord_token(),
+            Box::new(storage),
+            github,
+            interval,
+        );
         drop(secrets);
         tracing::info!(
             version = VERSION,

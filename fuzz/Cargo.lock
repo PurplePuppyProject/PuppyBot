@@ -465,6 +465,10 @@ dependencies = [
 name = "puppybot"
 version = "0.1.0"
 dependencies = [
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "puppybot-core",
  "redb",
  "ring",

@@ -18,6 +18,7 @@ pub const MAX_SIZE: usize = 4096;
 #[derive(Debug)]
 pub struct Secrets {
     discord_token: SecretString,
+    github_token: Option<SecretString>,
 }
 
 impl Secrets {
@@ -28,8 +29,13 @@ impl Secrets {
     ///
     /// [`Error`] if a file can't be read or holds no valid secret.
     pub fn load(config: &Config) -> Result<Self, Error> {
+        let github_token = match &config.github.token_file {
+            Some(path) => Some(read("the GitHub token", path)?),
+            None => None,
+        };
         Ok(Self {
             discord_token: read("the Discord token", &config.discord.token_file)?,
+            github_token,
         })
     }
 
@@ -37,6 +43,12 @@ impl Secrets {
     #[must_use]
     pub fn discord_token(&self) -> &SecretString {
         &self.discord_token
+    }
+
+    /// The token for GitHub's API, if the configuration names one.
+    #[must_use]
+    pub fn github_token(&self) -> Option<&SecretString> {
+        self.github_token.as_ref()
     }
 }
 
@@ -158,7 +170,7 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use super::*;
-    use crate::config::{DiscordConfig, StorageConfig};
+    use crate::config::{DiscordConfig, GithubConfig, StorageConfig};
     use crate::logging::LogConfig;
 
     #[test]
@@ -214,6 +226,7 @@ mod tests {
             },
             storage: StorageConfig::default(),
             log: LogConfig::default(),
+            github: GithubConfig::default(),
         }
     }
 
@@ -226,9 +239,27 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
             let secrets = Secrets::load(&config(&path)).unwrap();
             assert_eq!(secrets.discord_token().expose_secret(), "abc.DEF");
+            assert!(secrets.github_token().is_none());
             // Debug shows no secret.
             assert!(!format!("{secrets:?}").contains("abc.DEF"));
         }
+        // And GitHub's, if the configuration names it.
+        let github = dir.path().join("github_token");
+        fs::write(&github, "github_pat_x\n").unwrap();
+        let mut with_github = config(&path);
+        with_github.github.token_file = Some(github);
+        let secrets = Secrets::load(&with_github).unwrap();
+        assert_eq!(
+            secrets.github_token().map(ExposeSecret::expose_secret),
+            Some("github_pat_x")
+        );
+        assert!(!format!("{secrets:?}").contains("github_pat_x"));
+        with_github.github.token_file = Some(dir.path().join("missing"));
+        let error = Secrets::load(&with_github).unwrap_err().to_string();
+        assert!(
+            error.starts_with("can't read the GitHub token from "),
+            "{error}"
+        );
     }
 
     #[test]

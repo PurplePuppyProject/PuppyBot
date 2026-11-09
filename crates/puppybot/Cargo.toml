@@ -26,15 +26,22 @@ twilight-model.workspace = true
 twilight-util.workspace = true
 redb.workspace = true
 ring.workspace = true
+# GitHub's API, with the HTTP client that twilight-http uses, too.
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-rustls.workspace = true
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 
 [dev-dependencies]
 futures-util.workspace = true
 http-body-util.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
 tokio-websockets.workspace = true
+# Checks the commands as Discord does, which the fake Discord of the tests doesn't.
+twilight-validate.workspace = true
 
 [lints]
 workspace = true

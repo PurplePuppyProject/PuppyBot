@@ -20,6 +20,13 @@ pub const DEFAULT_DATABASE: &str = "/var/lib/puppybot/puppybot.redb";
 /// change the configuration but not read the token file can't send the token elsewhere.
 const LOOPBACK: [&str; 3] = ["127.0.0.1", "[::1]", "localhost"];
 
+/// How many seconds PuppyBot waits between its checks of GitHub, if the configuration doesn't
+/// say.
+pub const DEFAULT_GITHUB_INTERVAL: u64 = 300;
+
+/// The fewest seconds between the checks of GitHub, but for tests, with `api-url`.
+pub const MIN_GITHUB_INTERVAL: u64 = 60;
+
 /// The configuration of PuppyBot.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,6 +39,35 @@ pub struct Config {
     /// The table `[log]`, which may be left out.
     #[serde(default)]
     pub log: LogConfig,
+    /// The table `[github]`, which may be left out.
+    #[serde(default)]
+    pub github: GithubConfig,
+}
+
+/// The table `[github]` of the configuration: how PuppyBot checks GitHub for the repositories
+/// that servers have announced.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct GithubConfig {
+    /// The file with a token for GitHub's API, e.g. a Docker secret, if there is one. After
+    /// [`parse`], a relative path in the file is relative to the directory of the configuration
+    /// file.
+    pub token_file: Option<PathBuf>,
+    /// How many seconds PuppyBot waits between its checks, at least [`MIN_GITHUB_INTERVAL`].
+    pub interval: u64,
+    /// For tests: GitHub's API on this machine, e.g. `http://127.0.0.1:1234`, instead of
+    /// GitHub's own. Then any interval goes.
+    pub api_url: Option<String>,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            token_file: None,
+            interval: DEFAULT_GITHUB_INTERVAL,
+            api_url: None,
+        }
+    }
 }
 
 /// The table `[storage]` of the configuration.
@@ -149,10 +185,10 @@ pub fn parse(text: &str, dir: &Path) -> Result<Config, String> {
         return Err("guilds in [discord] is empty: PuppyBot would work on no server".to_owned());
     }
     if let Some(url) = &discord.gateway_url {
-        loopback("gateway-url", url, "ws")?;
+        loopback("discord", "gateway-url", url, "ws")?;
     }
     if let Some(url) = &discord.api_url {
-        loopback("api-url", url, "http")?;
+        loopback("discord", "api-url", url, "http")?;
     }
     discord.token_file = dir.join(&discord.token_file);
     let storage = &mut config.storage;
@@ -160,12 +196,33 @@ pub fn parse(text: &str, dir: &Path) -> Result<Config, String> {
         return Err("path in [storage] is empty".to_owned());
     }
     storage.path = dir.join(&storage.path);
+    let github = &mut config.github;
+    if let Some(path) = &github.token_file {
+        if path.as_os_str().is_empty() {
+            return Err("token-file in [github] is empty".to_owned());
+        }
+        github.token_file = Some(dir.join(path));
+    }
+    if let Some(url) = &github.api_url {
+        loopback("github", "api-url", url, "http")?;
+    }
+    let least = if github.api_url.is_some() {
+        1
+    } else {
+        MIN_GITHUB_INTERVAL
+    };
+    if github.interval < least {
+        return Err(format!(
+            "interval in [github] is {}, but PuppyBot checks GitHub at most every {least} seconds",
+            github.interval
+        ));
+    }
     Ok(config)
 }
 
-/// Whether `url`, the value of `key`, is `scheme://host` or `scheme://host:port` with a host of
-/// [`LOOPBACK`].
-fn loopback(key: &str, url: &str, scheme: &str) -> Result<(), String> {
+/// Whether `url`, the value of `key` in `[table]`, is `scheme://host` or `scheme://host:port` with
+/// a host of [`LOOPBACK`].
+fn loopback(table: &str, key: &str, url: &str, scheme: &str) -> Result<(), String> {
     let address = url
         .strip_prefix(scheme)
         .and_then(|rest| rest.strip_prefix("://"))
@@ -183,7 +240,7 @@ fn loopback(key: &str, url: &str, scheme: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "{key} in [discord] is for tests, so it must be {scheme}:// with 127.0.0.1, [::1] or localhost, and a port or none, not {url:?}"
+            "{key} in [{table}] is for tests, so it must be {scheme}:// with 127.0.0.1, [::1] or localhost, and a port or none, not {url:?}"
         ))
     }
 }
@@ -220,6 +277,11 @@ mod tests {
                     level: Level::Info,
                     format: Format::Text,
                 },
+                github: GithubConfig {
+                    token_file: None,
+                    interval: 300,
+                    api_url: None,
+                },
             })
         );
     }
@@ -239,6 +301,10 @@ path = \"data/puppybot.redb\"
 [log]
 level = \"debug\"
 format = \"json\"
+
+[github]
+token-file = \"github_token\"
+interval = 600
 ";
         let config = parse(text, Path::new("/etc/puppybot")).unwrap();
         assert_eq!(
@@ -263,6 +329,30 @@ format = \"json\"
                 format: Format::Json,
             }
         );
+        assert_eq!(
+            config.github,
+            GithubConfig {
+                token_file: Some(PathBuf::from("/etc/puppybot/github_token")),
+                interval: 600,
+                api_url: None,
+            }
+        );
+    }
+
+    #[test]
+    fn github_for_tests() {
+        // On this machine, with any interval.
+        let text = format!("{DISCORD}[github]\napi-url = \"http://127.0.0.1:9\"\ninterval = 1\n");
+        let github = parse(&text, Path::new("/etc")).unwrap().github;
+        assert_eq!(
+            (github.api_url.as_deref(), github.interval),
+            (Some("http://127.0.0.1:9"), 1)
+        );
+        let text = format!("{DISCORD}[github]\napi-url = \"https://api.github.com\"\n");
+        assert_eq!(
+            parse(&text, Path::new("/etc")),
+            Err("api-url in [github] is for tests, so it must be http:// with 127.0.0.1, [::1] or localhost, and a port or none, not \"https://api.github.com\"".to_owned())
+        );
     }
 
     #[test]
@@ -280,6 +370,7 @@ format = \"json\"
         );
         assert_eq!(config.storage, StorageConfig::default());
         assert_eq!(config.log, LogConfig::default());
+        assert_eq!(config.github, GithubConfig::default());
     }
 
     #[test]
@@ -333,7 +424,23 @@ format = \"json\"
             ),
             (
                 &format!("{DISCORD}[logs]\n"),
-                "unknown field `logs`, expected one of `discord`, `storage`, `log`",
+                "unknown field `logs`, expected one of `discord`, `storage`, `log`, `github`",
+            ),
+            (
+                &format!("{DISCORD}[github]\ntoken-file = \"\"\n"),
+                "token-file in [github] is empty",
+            ),
+            (
+                &format!("{DISCORD}[github]\ninterval = 59\n"),
+                "interval in [github] is 59, but PuppyBot checks GitHub at most every 60 seconds",
+            ),
+            (
+                &format!("{DISCORD}[github]\napi-url = \"http://127.0.0.1:9\"\ninterval = 0\n"),
+                "interval in [github] is 0, but PuppyBot checks GitHub at most every 1 seconds",
+            ),
+            (
+                &format!("{DISCORD}[github]\ntoken = \"t\"\n"),
+                "unknown field `token`, expected one of `token-file`, `interval`, `api-url`",
             ),
             (
                 &format!("{DISCORD}[storage]\nfile = \"db\"\n"),

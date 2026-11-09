@@ -13,9 +13,9 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use common::{
-    APPLICATION, CHANNEL_MESSAGES, COMMAND_ANSWER, FakeDiscord, GUILD, MANAGE_GUILD, MENTION,
-    OTHER_GUILD, Running, Send, TOKEN, config, guild_create, interaction, message, ready, settings,
-    setup, slash,
+    APPLICATION, BUTTON_ANSWER, CHANNEL, CHANNEL_MESSAGES, COMMAND_ANSWER, FakeDiscord, FakeGithub,
+    GUILD, MANAGE_GUILD, MENTION, OTHER_GUILD, Running, Send, TOKEN, button, config, guild_create,
+    interaction, message, message_delete, ready, save_quote, settings, setup, slash,
 };
 
 /// Starts PuppyBot with `discord`.
@@ -33,7 +33,7 @@ fn registers_the_commands_leaves_other_servers_and_answers() {
                 ready(url),
                 guild_create(GUILD),
                 guild_create(OTHER_GUILD),
-                // A button, which isn't a slash command: no answer.
+                // A button that isn't PuppyBot's: no answer.
                 interaction(3, "", "de", GUILD),
                 interaction(2, "info", "de", GUILD),
             ]
@@ -141,6 +141,8 @@ fn failing_requests_are_warnings() {
                 interaction(2, "info", "en-US", GUILD),
                 message(1, "!info", GUILD, false),
                 message(2, "!poll Pizza? | Ja | Nein", GUILD, false),
+                // Not even that PuppyBot is working on it.
+                slash("github", &github_add("a/b"), "en-US", MANAGE_GUILD),
             ]
         },
         Some(400),
@@ -522,4 +524,400 @@ fn polls_in_the_channel() {
         "{}",
         posted[2].body
     );
+}
+
+#[test]
+fn the_server_and_people() {
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                slash("server", "[]", "en-US", 0),
+                message(1, "!user", GUILD, false),
+                message(2, "!server", GUILD, false),
+            ]
+        },
+        None,
+    );
+    let (_dir, bot) = start(&discord);
+    let commands = requests_to(&discord, COMMAND_ANSWER, 1);
+    let texts = requests_to(&discord, CHANNEL_MESSAGES, 2);
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert_eq!(
+        (commands.len(), texts.len()),
+        (1, 2),
+        "{commands:#?} {texts:#?}"
+    );
+    // From Discord's API, with the counts.
+    assert!(
+        discord
+            .requests()
+            .iter()
+            .any(|request| request.method == "GET"
+                && request.path == format!("/api/v10/guilds/{GUILD}")),
+        "{:#?}",
+        discord.requests()
+    );
+    let server = "**Purple Puppies** was created on <t:1682330837:D> (<t:1682330837:R>), and has about 42 members.";
+    assert!(commands[0].body.contains(server), "{}", commands[0].body);
+    assert!(texts[1].body.contains(server), "{}", texts[1].body);
+    assert!(
+        texts[0]
+            .body
+            .contains("**puppy** is on Discord since <t:1753856410:D> (<t:1753856410:R>), and on this server since <t:1767225600:D>."),
+        "{}",
+        texts[0].body
+    );
+}
+
+/// A game of guessing from 1 to 2, as the options of /guess.
+const GUESS_TO_2: &str = r#"[{"name": "max", "type": 4, "value": 2}]"#;
+
+#[test]
+fn games_for_everyone_in_the_channel() {
+    let question = r#"[{"name": "question", "type": 3, "value": "Scheint *morgen* die Sonne?"}]"#;
+    let discord = FakeDiscord::start(
+        move |url| {
+            vec![
+                ready(url),
+                slash("coin", "[]", "en-US", 0),
+                slash("8ball", question, "de", 0),
+                slash("rps", "[]", "de", 0),
+                button("rps:scissors", "en-US"),
+                // Not a hand: no answer.
+                button("rps:lizard", "en-US"),
+                slash("guess", GUESS_TO_2, "en-US", 0),
+            ]
+        },
+        None,
+    );
+    let (_dir, bot) = start(&discord);
+    let commands = requests_to(&discord, COMMAND_ANSWER, 4);
+    let clicks = requests_to(&discord, BUTTON_ANSWER, 1);
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert_eq!(
+        (commands.len(), clicks.len()),
+        (4, 1),
+        "{commands:#?} {clicks:#?}"
+    );
+
+    // For everyone in the channel, as messages that mention nobody.
+    for answer in &commands {
+        assert!(answer.body.contains(r#""type":4"#), "{}", answer.body);
+        assert!(!answer.body.contains(r#""flags":64"#), "{}", answer.body);
+        assert!(
+            answer.body.contains(r#""allowed_mentions":{"parse":[]}"#),
+            "{}",
+            answer.body
+        );
+    }
+    assert!(
+        commands[0].body.contains("The coin shows **"),
+        "{}",
+        commands[0].body
+    );
+    // The question as it is, not in Markdown.
+    assert!(
+        commands[1]
+            .body
+            .contains(r#""content":"🎱 *Scheint \\*morgen\\* die Sonne?* **"#),
+        "{}",
+        commands[1].body
+    );
+    // Rock, paper, scissors: the buttons, and the game in their place after a click.
+    let rps = &commands[2].body;
+    assert!(rps.contains("Schere, Stein oder Papier?"), "{rps}");
+    for part in [
+        r#""custom_id":"rps:rock""#,
+        r#""label":"Stein""#,
+        r#""custom_id":"rps:scissors""#,
+    ] {
+        assert!(rps.contains(part), "{part}: {rps}");
+    }
+    let click = &clicks[0].body;
+    assert!(click.contains(r#""type":7"#), "{click}");
+    assert!(
+        click.contains("**puppy** chose scissors, PuppyBot "),
+        "{click}"
+    );
+    assert!(click.contains(r#""components":[]"#), "{click}");
+    assert!(!click.contains(r#""flags":64"#), "{click}");
+    assert!(
+        commands[3]
+            .body
+            .contains("PuppyBot thinks of a number from 1 to 2."),
+        "{}",
+        commands[3].body
+    );
+}
+
+#[test]
+fn games_as_text_commands() {
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                message(1, "!münze", GUILD, false),
+                message(2, "!8kugel", GUILD, false),
+                message(3, "!ssp", GUILD, false),
+                // A game of /guess, which runs in the channel.
+                slash("guess", GUESS_TO_2, "en-US", 0),
+                message(4, "!rate", GUILD, false),
+                message(5, "!rate 3", GUILD, false),
+                message(6, "!rate 1", GUILD, false),
+                message(7, "!rate 2", GUILD, false),
+            ]
+        },
+        None,
+    );
+    let (_dir, bot) = start(&discord);
+    let texts = requests_to(&discord, CHANNEL_MESSAGES, 7);
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert_eq!(texts.len(), 7, "{texts:#?}");
+
+    // In the language of the server, as replies that mention nobody.
+    for (text, id) in texts.iter().zip(1..) {
+        assert!(
+            text.body.contains(&format!(r#""message_id":"{id}""#)),
+            "{}",
+            text.body
+        );
+        assert!(
+            text.body.contains(r#""allowed_mentions":{"parse":[]}"#),
+            "{}",
+            text.body
+        );
+    }
+    assert!(
+        texts[0].body.contains("The coin shows **"),
+        "{}",
+        texts[0].body
+    );
+    assert!(
+        texts[1].body.contains(r#""content":"🎱 **"#),
+        "{}",
+        texts[1].body
+    );
+    assert!(
+        texts[2].body.contains("Rock, paper or scissors?"),
+        "{}",
+        texts[2].body
+    );
+    assert!(
+        texts[2].body.contains(r#""label":"Rock""#),
+        "{}",
+        texts[2].body
+    );
+    assert!(
+        texts[3]
+            .body
+            .contains("A game runs here: the number is from 1 to 2."),
+        "{}",
+        texts[3].body
+    );
+    assert!(
+        texts[4].body.contains("The number is between 1 and 2."),
+        "{}",
+        texts[4].body
+    );
+    // 1 is right, and 2 starts a new game; or 1 is too low, and 2 is right.
+    let (one, two) = (&texts[5].body, &texts[6].body);
+    let first = one.contains("**puppy** got it: **1**, on the first guess!")
+        && two.contains("PuppyBot thinks of a number from 1 to 100.");
+    let second = one.contains("1? The number is higher.")
+        && two.contains("**puppy** got it: **2**, after 2 guesses!");
+    assert!(first || second, "{one} {two}");
+}
+
+/// The options of /quote `subcommand`, with the number `number` if given, as JSON.
+fn quote(subcommand: &str, number: Option<u32>) -> String {
+    let number = number.map_or_else(String::new, |number| {
+        format!(r#"{{"name": "number", "type": 4, "value": {number}}}"#)
+    });
+    format!(r#"[{{"name": "{subcommand}", "type": 1, "options": [{number}]}}]"#)
+}
+
+/// The permission "Manage Messages", as Discord sends permissions: a number.
+const MANAGE_MESSAGES: u64 = 1 << 13;
+
+#[test]
+fn quotes_saved_shown_and_deleted() {
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                save_quote(20, "**Wuff!**", "de"),
+                save_quote(20, "**Wuff!**", "en-US"),
+                save_quote(21, "Wau!", "en-US"),
+                slash("quote", &quote("show", Some(1)), "en-US", 0),
+                // By someone else, who may delete it only if they may manage messages.
+                slash("quote", &quote("delete", Some(1)), "de", 0),
+                slash("quote", &quote("delete", Some(1)), "en-US", MANAGE_MESSAGES),
+                message(1, "!zitat 1", GUILD, false),
+                // With its message, the quote goes, too.
+                message_delete(21),
+                message(2, "!quote", GUILD, false),
+            ]
+        },
+        None,
+    );
+    let (_dir, mut bot) = start(&discord);
+    let commands = requests_to(&discord, COMMAND_ANSWER, 6);
+    let texts = requests_to(&discord, CHANNEL_MESSAGES, 2);
+    bot.wait_for("as its message is gone");
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert_eq!(
+        (commands.len(), texts.len()),
+        (6, 2),
+        "{commands:#?} {texts:#?}"
+    );
+    let registered = discord.wait_for_request(&format!(
+        "PUT /api/v10/applications/{APPLICATION}/guilds/{GUILD}/commands"
+    ));
+    assert!(
+        registered.body.contains(r#""name":"Save quote""#),
+        "{}",
+        registered.body
+    );
+
+    // Saving, only for the person who saves.
+    let saved = [
+        "PuppyBot hat die Nachricht als Zitat #1 gespeichert.",
+        "This message is quote #1 already.",
+        "PuppyBot saved the message as quote #2.",
+    ];
+    for (answer, text) in commands.iter().zip(saved) {
+        assert!(answer.body.contains(text), "{text}: {}", answer.body);
+        assert!(answer.body.contains(r#""flags":64"#), "{}", answer.body);
+    }
+    // The quote, for everyone, as it was written, with a link to the message.
+    let shown = &commands[3].body;
+    let link =
+        format!("[Quote #1](<https://discord.com/channels/{GUILD}/{CHANNEL}/20>) by **Rex**");
+    assert!(shown.contains(&link), "{shown}");
+    assert!(shown.contains(r#":\n> \\*\\*Wuff!\\*\\*""#), "{shown}");
+    assert!(!shown.contains(r#""flags":64"#), "{shown}");
+    assert!(
+        commands[4]
+            .body
+            .contains("Zitat #1 dürfen nur die zitierte Person und Leute löschen"),
+        "{}",
+        commands[4].body
+    );
+    assert!(
+        commands[5].body.contains("PuppyBot deleted quote #1."),
+        "{}",
+        commands[5].body
+    );
+
+    // As text commands.
+    assert!(
+        texts[0].body.contains("This server has no quote #1."),
+        "{}",
+        texts[0].body
+    );
+    assert!(
+        texts[1].body.contains("This server has no quotes yet."),
+        "{}",
+        texts[1].body
+    );
+    for part in [
+        "saved a quote",
+        "deleted a quote",
+        "deleted a quote, as its message is gone",
+    ] {
+        assert!(log.contains(part), "{part}: {log}");
+    }
+}
+
+/// The options of /github add of `repo`, announced in [`CHANNEL`].
+fn github_add(repo: &str) -> String {
+    format!(
+        r#"[{{"name": "add", "type": 1, "options": [{{"name": "repo", "type": 3, "value": "{repo}"}},
+        {{"name": "channel", "type": 7, "value": "{CHANNEL}"}}]}}]"#
+    )
+}
+
+/// The commits of `a/b` on GitHub, with these hashes and titles, the newest first.
+fn commits(commits: &[(&str, &str)]) -> String {
+    let commits: Vec<String> = commits
+        .iter()
+        .map(|(sha, title)| {
+            format!(
+                r#"{{"sha": "{sha}", "commit": {{"message": "{title}", "author": {{"name": "Rex"}}}}, "author": null}}"#
+            )
+        })
+        .collect();
+    format!("[{}]", commits.join(","))
+}
+
+#[test]
+fn new_commits_of_github() {
+    let github = FakeGithub::start();
+    github.answer(
+        "/repos/a/b",
+        200,
+        r#"{"full_name": "a/b", "private": false, "default_branch": "main"}"#,
+    );
+    let path = "/repos/a/b/commits?sha=main&per_page=30";
+    github.answer(path, 200, &commits(&[("aaaaaaa", "First")]));
+    github.answer("/repos/a/b/releases?per_page=10", 200, "[]");
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                slash("github", &github_add("a/b"), "en-US", MANAGE_GUILD),
+            ]
+        },
+        None,
+    );
+    let extra = format!("[github]\napi-url = \"{}\"\ninterval = 1\n", github.url);
+    let dir = setup(&config(Some(&discord), &extra), Some((TOKEN, 0o600)));
+    let mut bot = Running::start(dir.path(), &[]);
+
+    // First that PuppyBot is working on it, then the answer.
+    let working = discord.wait_for_request(COMMAND_ANSWER);
+    assert!(working.body.contains(r#""type":5"#), "{}", working.body);
+    assert!(working.body.contains(r#""flags":64"#), "{}", working.body);
+    let answer = discord.wait_for_request(&format!(
+        "PATCH /api/v10/webhooks/{APPLICATION}/command-token/messages/@original"
+    ));
+    assert!(
+        answer.body.contains(&format!(
+            "From now on, PuppyBot announces new commits on `main` and releases of **a/b** in <#{CHANNEL}>."
+        )),
+        "{}",
+        answer.body
+    );
+    bot.wait_for("announcing a repository of GitHub");
+
+    // A new commit, in the channel, in the language of the server.
+    github.answer(
+        path,
+        200,
+        &commits(&[("bbbbbbb", "Second"), ("aaaaaaa", "First")]),
+    );
+    let announced = discord.wait_for_request(CHANNEL_MESSAGES);
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert!(
+        announced.body.contains(
+            "**1 new commit** in a/b (`main`):\\n- [`bbbbbbb`](<https://github.com/a/b/commit/bbbbbbb>) Second: Rex"
+        ),
+        "{}",
+        announced.body
+    );
+    assert!(
+        announced
+            .body
+            .contains(r#""allowed_mentions":{"parse":[]}"#),
+        "{}",
+        announced.body
+    );
+    // Without a token, as the configuration names none.
+    assert!(github.got().contains(&path.to_owned()));
 }

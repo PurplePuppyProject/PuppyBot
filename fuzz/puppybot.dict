@@ -79,3 +79,17 @@
 "\",\""
 "{}"
 "[]"
+
+# The answers of GitHub's API.
+"\"full_name\""
+"\"private\""
+"\"default_branch\""
+"\"sha\""
+"\"commit\""
+"\"message\""
+"\"author\""
+"\"login\""
+"\"name\""
+"\"id\""
+"\"tag_name\""
+"\"draft\""

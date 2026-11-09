@@ -9,8 +9,13 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 
 use puppybot_core::dice::{self, Dice};
+use puppybot_core::games::{Coin, EIGHT_BALL, GameText, Hint};
+use puppybot_core::github::{
+    Commit, GithubText, MAX_BRANCH, MAX_REPOS, Repo, Watch as Shown, is_valid_branch, new_commits,
+};
 use puppybot_core::i18n::Lang;
 use puppybot_core::poll::{self, Poll};
+use puppybot_core::quotes::{self, MAX_QUOTE, QuoteText};
 use puppybot_core::text::Text;
 use puppybot_core::text_command;
 use secrecy::ExposeSecret;
@@ -19,7 +24,9 @@ use twilight_model::channel::message::{AllowedMentions, MessageFlags};
 use twilight_model::id::Id;
 
 use crate::cli;
-use crate::commands::{Audience, Request};
+use crate::commands::{Answer, Audience, Request};
+use crate::github::{self, OwnedCommit};
+use crate::storage::Quote;
 
 /// The command line, as arguments separated by NUL bytes, which arguments can't hold.
 ///
@@ -73,8 +80,9 @@ pub fn config(data: &[u8]) {
 /// An interaction, as JSON from Discord's gateway.
 ///
 /// Checks beyond not crashing: each answer that what [`crate::commands::request`] reads may
-/// get, with what the database may hold, is a message that only the person who asked sees,
-/// mentions nobody, and fits into Discord's limit of 2000 characters.
+/// get, with what the database may hold, is ephemeral exactly when it is only for the person who
+/// asked, mentions nobody, not even in its text, and fits into Discord's limit of 2000
+/// characters.
 ///
 /// # Panics
 ///
@@ -88,73 +96,360 @@ pub fn interaction(data: &[u8]) {
         return;
     };
     let lang = asked.lang;
-    let only_asker = |texts: &[Text<'_>]| {
-        texts
-            .iter()
-            .map(|text| (text.render(lang), Audience::Asker))
-            .collect::<Vec<_>>()
-    };
     let answers = match asked.request {
-        Request::Answer(text) => only_asker(&[text]),
-        Request::ShowLanguage(_) => only_asker(&[
-            Text::LanguageIs { chosen: None },
-            Text::LanguageIs {
-                chosen: Some(Lang::De),
-            },
-            Text::StorageFailed,
-        ]),
-        Request::SetLanguage(_, new) => {
-            only_asker(&[Text::LanguageSet { lang: new }, Text::StorageFailed])
-        }
-        Request::ShowPrefix(_) => only_asker(&[
-            Text::PrefixIs { chosen: None },
-            Text::PrefixIs {
-                chosen: Some("pb!"),
-            },
-            Text::StorageFailed,
-        ]),
+        Request::Answer(text) => texts(lang, &[text], Audience::Asker),
+        Request::ShowLanguage(_) => texts(lang, &LANGUAGES, Audience::Asker),
+        Request::SetLanguage(_, new) => texts(
+            lang,
+            &[Text::LanguageSet { lang: new }, Text::StorageFailed],
+            Audience::Asker,
+        ),
+        Request::ShowPrefix(_) => texts(lang, &PREFIXES, Audience::Asker),
         Request::SetPrefix(_, prefix) => {
             assert!(text_command::is_valid_prefix(prefix), "{prefix:?}");
-            only_asker(&[Text::PrefixSet { prefix }, Text::StorageFailed])
+            texts(
+                lang,
+                &[Text::PrefixSet { prefix }, Text::StorageFailed],
+                Audience::Asker,
+            )
         }
+        Request::ServerInfo(_) => texts(
+            lang,
+            &[
+                Text::ServerInfo {
+                    name: &"x".repeat(1000),
+                    created: i64::MAX,
+                    members: Some(u64::MAX),
+                },
+                Text::InfoFailed,
+            ],
+            Audience::Asker,
+        ),
         Request::Poll(poll) => {
             check_poll(&poll);
-            only_asker(&[Text::PollPosted, Text::PollFailed])
+            texts(lang, &[Text::PollPosted, Text::PollFailed], Audience::Asker)
         }
-        Request::Roll { dice, secret } => {
-            let audience = if secret {
-                Audience::Asker
-            } else {
-                Audience::Everyone
-            };
-            // Every die at its most, which writes the longest numbers.
-            let roll = dice
-                .roll(&mut |sides| Some(sides))
-                .map(|roll| roll.to_string())
-                .unwrap_or_default();
-            assert!(!roll.is_empty(), "no roll of {dice}");
-            let rolled = Text::Rolled {
-                dice: &dice.to_string(),
-                roll: &roll,
-            };
-            vec![
-                (rolled.render(lang), audience),
-                (Text::DiceFailed.render(lang), audience),
-            ]
-        }
+        Request::Roll { dice, secret } => rolls(lang, &dice, secret),
+        Request::SaveQuote(_, quote) => saving(lang, &quote),
+        Request::ShowQuote(_, number) => showing(lang, number),
+        Request::DeleteQuote { number, .. } => deleting(lang, number),
+        Request::GithubAdd { repo, branch, .. } => adding(lang, repo, branch),
+        Request::GithubRemove(_, repo) => removing(lang, repo),
+        Request::GithubList(_) => listing(lang),
+        Request::Coin => games(lang, &COINS),
+        Request::EightBall(question) => games(
+            lang,
+            &[
+                GameText::EightBall {
+                    question,
+                    answer: EIGHT_BALL - 1,
+                },
+                GameText::GameFailed,
+            ],
+        ),
+        Request::RpsChoose => vec![Answer {
+            buttons: crate::commands::rps_buttons(lang),
+            ..Answer::new(GameText::RpsChoose.render(lang), Audience::Everyone)
+        }],
+        Request::RpsPlay { hand, player } => games(
+            lang,
+            &[
+                GameText::RpsPlayed {
+                    player,
+                    hand,
+                    bot: hand,
+                },
+                GameText::GameFailed,
+            ],
+        ),
+        Request::Guess {
+            number,
+            max,
+            player,
+        } => games(
+            lang,
+            &[
+                GameText::Guessed {
+                    player,
+                    number: number.unwrap_or(u32::MAX),
+                    hint: Hint::Right { tries: u32::MAX },
+                    max: max.unwrap_or(u32::MAX),
+                },
+                GameText::GuessStarted {
+                    max: max.unwrap_or(u32::MAX),
+                },
+                GameText::GameFailed,
+            ],
+        ),
     };
-    for (content, audience) in answers {
-        // An answer without a message has none of these.
-        let data = crate::commands::response(content, audience)
-            .data
-            .unwrap_or_default();
-        let ephemeral = (audience == Audience::Asker).then_some(MessageFlags::EPHEMERAL);
-        assert_eq!(data.flags, ephemeral, "{data:?}");
-        assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
-        assert!(
-            data.content
-                .is_some_and(|content| content.chars().count() <= 2000)
-        );
+    answers.into_iter().for_each(check);
+}
+
+/// What `/dice` may answer to `dice`, in `lang`, for everyone or, if `secret`, for the person who
+/// asked: a roll, of every die at its most, which writes the longest numbers, or a failure.
+fn rolls(lang: Lang, dice: &Dice, secret: bool) -> Vec<Answer> {
+    let audience = if secret {
+        Audience::Asker
+    } else {
+        Audience::Everyone
+    };
+    let roll = dice
+        .roll(&mut |sides| Some(sides))
+        .map(|roll| roll.to_string())
+        .unwrap_or_default();
+    assert!(!roll.is_empty(), "no roll of {dice}");
+    let rolled = Text::Rolled {
+        dice: &dice.to_string(),
+        roll: &roll,
+    };
+    texts(lang, &[rolled, Text::DiceFailed], audience)
+}
+
+/// What saving `quote` may answer, in `lang`, and the quote, as /quote would show it.
+fn saving(lang: Lang, quote: &Quote) -> Vec<Answer> {
+    let saved = [
+        QuoteText::Saved { number: u32::MAX },
+        QuoteText::AlreadySaved { number: u32::MAX },
+        QuoteText::Empty,
+        QuoteText::TooLong,
+        QuoteText::Full,
+    ];
+    let mut answers = quote_texts(lang, &saved, Audience::Asker);
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    if let Ok(text) = quotes::quote(&quote.text) {
+        answers.push(shown(lang, u32::MAX, &quote.name, text));
+    }
+    answers
+}
+
+/// What /quote show may answer to `number`, in `lang`: also the longest quotes.
+fn showing(lang: Lang, number: Option<u32>) -> Vec<Answer> {
+    let number = number.unwrap_or(u32::MAX);
+    let author = "*".repeat(1000);
+    let longest = [
+        "\n".repeat(MAX_QUOTE),
+        "*".repeat(MAX_QUOTE),
+        "*\n".repeat(MAX_QUOTE / 2),
+    ];
+    let mut answers: Vec<_> = longest
+        .iter()
+        .map(|text| shown(lang, number, &author, text))
+        .collect();
+    let missing = [QuoteText::NoQuotes, QuoteText::NoSuchQuote { number }];
+    answers.extend(quote_texts(lang, &missing, Audience::Asker));
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    answers
+}
+
+/// What /quote delete may answer to `number`, in `lang`.
+fn deleting(lang: Lang, number: u32) -> Vec<Answer> {
+    let deleted = [
+        QuoteText::Deleted { number },
+        QuoteText::NotYours { number },
+        QuoteText::NoSuchQuote { number },
+    ];
+    let mut answers = quote_texts(lang, &deleted, Audience::Asker);
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    answers
+}
+
+/// The answer that shows `text` as the quote `number` by `author`, in `lang`, with the longest
+/// link and date.
+fn shown(lang: Lang, number: u32, author: &str, text: &str) -> Answer {
+    let link = format!("https://discord.com/channels/{0}/{0}/{0}", u64::MAX);
+    let shown = QuoteText::Shown {
+        number,
+        author,
+        said: i64::MIN,
+        text,
+        link: &link,
+    };
+    Answer::new(shown.render(lang), Audience::Everyone)
+}
+
+/// What /github add may answer to `repo` and `branch`, as the person wrote them, in `lang`.
+fn adding(lang: Lang, repo: &str, branch: Option<&str>) -> Vec<Answer> {
+    let failed = [
+        GithubText::InvalidRepo,
+        GithubText::InvalidBranch,
+        GithubText::Full,
+        GithubText::GithubFailed,
+    ];
+    let mut answers = github_texts(lang, &failed);
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    if let Some(repo) = Repo::parse(repo) {
+        let repo = repo.to_string();
+        let branch = branch
+            .filter(|branch| is_valid_branch(branch))
+            .unwrap_or("main");
+        let channel = format!("<#{}>", u64::MAX);
+        let added = [
+            GithubText::Added {
+                repo: &repo,
+                branch,
+                channel: &channel,
+                releases: true,
+            },
+            GithubText::NoSuchRepo { repo: &repo },
+            GithubText::NoSuchBranch {
+                repo: &repo,
+                branch,
+            },
+        ];
+        answers.extend(github_texts(lang, &added));
+    }
+    answers
+}
+
+/// What /github remove may answer to `repo`, as the person wrote it, in `lang`.
+fn removing(lang: Lang, repo: &str) -> Vec<Answer> {
+    let mut answers = github_texts(lang, &[GithubText::InvalidRepo]);
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    if let Some(repo) = Repo::parse(repo) {
+        let repo = repo.to_string();
+        let removed = [
+            GithubText::Removed { repo: &repo },
+            GithubText::NotWatched { repo: &repo },
+        ];
+        answers.extend(github_texts(lang, &removed));
+    }
+    answers
+}
+
+/// What /github list may answer, in `lang`: also the longest list.
+fn listing(lang: Lang) -> Vec<Answer> {
+    let repo = format!("{}/{}", "a".repeat(39), "_".repeat(100));
+    let branch = "b".repeat(MAX_BRANCH);
+    let channel = format!("<#{}>", u64::MAX);
+    let watch = Shown {
+        repo: &repo,
+        branch: &branch,
+        channel: &channel,
+        releases: true,
+    };
+    let watches = [watch; MAX_REPOS];
+    let lists = [GithubText::Watched(&[]), GithubText::Watched(&watches)];
+    let mut answers = github_texts(lang, &lists);
+    answers.extend(texts(lang, &[Text::StorageFailed], Audience::Asker));
+    answers
+}
+
+/// An answer for the person who asked with each of the texts of GitHub, `texts`, in `lang`.
+fn github_texts(lang: Lang, texts: &[GithubText<'_>]) -> Vec<Answer> {
+    texts
+        .iter()
+        .map(|text| Answer::new(text.render(lang), Audience::Asker))
+        .collect()
+}
+
+/// An answer for `audience` with each of the quotes' `texts`, in `lang`.
+fn quote_texts(lang: Lang, texts: &[QuoteText<'_>], audience: Audience) -> Vec<Answer> {
+    texts
+        .iter()
+        .map(|text| Answer::new(text.render(lang), audience))
+        .collect()
+}
+
+/// An answer for `audience` with each of `texts`, in `lang`.
+fn texts(lang: Lang, texts: &[Text<'_>], audience: Audience) -> Vec<Answer> {
+    texts
+        .iter()
+        .map(|text| Answer::new(text.render(lang), audience))
+        .collect()
+}
+
+/// An answer for everyone with each of the games' `texts`, in `lang`.
+fn games(lang: Lang, texts: &[GameText<'_>]) -> Vec<Answer> {
+    texts
+        .iter()
+        .map(|text| Answer::new(text.render(lang), Audience::Everyone))
+        .collect()
+}
+
+/// What `/settings language` may answer, with what the database may hold.
+const LANGUAGES: [Text<'static>; 3] = [
+    Text::LanguageIs { chosen: None },
+    Text::LanguageIs {
+        chosen: Some(Lang::De),
+    },
+    Text::StorageFailed,
+];
+
+/// What `/settings prefix` may answer, with what the database may hold.
+const PREFIXES: [Text<'static>; 3] = [
+    Text::PrefixIs { chosen: None },
+    Text::PrefixIs {
+        chosen: Some("pb!"),
+    },
+    Text::StorageFailed,
+];
+
+/// What `/coin` may answer.
+const COINS: [GameText<'static>; 3] = [
+    GameText::Coin(Coin::Heads),
+    GameText::Coin(Coin::Tails),
+    GameText::GameFailed,
+];
+
+/// The checks of [`interaction`] of `answer`.
+fn check(answer: Answer) {
+    let audience = answer.audience;
+    // An answer without a message has none of these.
+    let data = crate::commands::response(answer).data.unwrap_or_default();
+    let ephemeral = (audience == Audience::Asker).then_some(MessageFlags::EPHEMERAL);
+    assert_eq!(data.flags, ephemeral, "{data:?}");
+    assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
+    let content = data.content.unwrap_or_default();
+    assert!((1..=2000).contains(&content.chars().count()), "{content}");
+    // Not even in the text: what others wrote, e.g. a name, appears as it is.
+    assert!(!content.contains("<@"), "{content}");
+}
+
+/// An answer of GitHub's API, as JSON: a repository, commits or releases.
+///
+/// Checks beyond not crashing: a repository's default branch is one that PuppyBot takes, each
+/// commit's hash has 7 to 64 hexadecimal digits, and what PuppyBot would post of the commits and
+/// releases fits into Discord's limit of 2000 characters and mentions nobody.
+///
+/// # Panics
+///
+/// If a check fails, which is what the fuzz target looks for.
+pub fn github_api(data: &[u8]) {
+    if let Some(info) = github::parse_repo(data) {
+        assert!(is_valid_branch(&info.default_branch), "{info:?}");
+    }
+    let mut messages = Vec::new();
+    if let Some(commits) = github::parse_commits(data) {
+        for commit in &commits {
+            let hex = commit.sha.bytes().all(|byte| byte.is_ascii_hexdigit());
+            assert!(hex && (7..=64).contains(&commit.sha.len()), "{commit:?}");
+        }
+        let commits: Vec<Commit<'_>> = commits.iter().map(OwnedCommit::commit).collect();
+        // All of them new, as after a force push.
+        let new = new_commits(&commits, "");
+        for lang in Lang::ALL {
+            let pushed = GithubText::Pushed {
+                repo: "a/b",
+                branch: "main",
+                commits: &new.commits,
+                more: new.more,
+                rewritten: new.rewritten,
+            };
+            messages.push(pushed.render(lang));
+        }
+    }
+    for release in github::parse_releases(data).unwrap_or_default() {
+        for lang in Lang::ALL {
+            let released = GithubText::Released {
+                repo: "a/b",
+                release: release.release(),
+            };
+            messages.push(released.render(lang));
+        }
+    }
+    for message in messages {
+        assert!(message.chars().count() <= 2000, "{message}");
+        assert!(!message.contains("<@"), "{message}");
     }
 }
 
@@ -295,7 +590,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use twilight_model::application::interaction::{Interaction, InteractionType};
+    use twilight_model::application::interaction::{Interaction, InteractionData, InteractionType};
     use twilight_model::id::Id;
 
     #[test]
@@ -354,6 +649,21 @@ mod tests {
         }
     }
 
+    /// The seeds of the fuzz target, in `fuzz/seeds/github_api`, are answers of GitHub.
+    #[test]
+    fn github_api_seeds() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/seeds/github_api");
+        let mut seeds = 0;
+        for entry in fs::read_dir(dir).unwrap() {
+            super::github_api(&fs::read(entry.unwrap().path()).unwrap());
+            seeds += 1;
+        }
+        assert_eq!(seeds, 3);
+        for input in [&b""[..], b"[]", b"{}", b"\xff"] {
+            super::github_api(input);
+        }
+    }
+
     /// The seeds of the fuzz target, in `fuzz/seeds/interaction`, are interactions that
     /// PuppyBot reads, so libFuzzer starts from input that gets far, and only its slash commands
     /// get an answer.
@@ -368,9 +678,16 @@ mod tests {
             println!("{}", path.display());
             let seed = fs::read(&path).unwrap();
             let interaction: Interaction = serde_json::from_slice(&seed).unwrap();
+            // Slash commands get an answer, and the buttons of rock, paper, scissors.
+            let answered = match &interaction.data {
+                Some(InteractionData::MessageComponent(data)) => {
+                    data.custom_id.starts_with(crate::commands::RPS)
+                }
+                _ => interaction.kind == InteractionType::ApplicationCommand,
+            };
             assert_eq!(
                 crate::commands::request(&interaction, &guilds).is_some(),
-                interaction.kind == InteractionType::ApplicationCommand
+                answered
             );
             super::interaction(&seed);
             seeds += 1;

@@ -4,8 +4,11 @@
 use std::collections::BTreeSet;
 
 use puppybot_core::dice::{self, Dice};
+use puppybot_core::games::{GameText, Guessing, Hand};
+use puppybot_core::github::{GithubText, MAX_BRANCH};
 use puppybot_core::i18n::Lang;
 use puppybot_core::poll::{self, Poll};
+use puppybot_core::quotes::QuoteText;
 use puppybot_core::text::Text;
 use puppybot_core::text_command;
 use twilight_model::application::command::{Command, CommandType};
@@ -15,15 +18,23 @@ use twilight_model::application::interaction::application_command::{
 use twilight_model::application::interaction::{
     Interaction, InteractionContextType, InteractionData, InteractionType,
 };
-use twilight_model::channel::message::{AllowedMentions, MessageFlags};
+use twilight_model::channel::ChannelType;
+use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
+use twilight_model::channel::message::{AllowedMentions, Component, MessageFlags};
 use twilight_model::guild::Permissions;
-use twilight_model::http::interaction::InteractionResponse;
+use twilight_model::http::interaction::{
+    InteractionResponse, InteractionResponseData, InteractionResponseType,
+};
 use twilight_model::id::Id;
-use twilight_model::id::marker::GuildMarker;
+use twilight_model::id::marker::{ChannelMarker, GuildMarker};
+use twilight_model::util::Timestamp;
 use twilight_util::builder::command::{
-    BooleanBuilder, CommandBuilder, IntegerBuilder, StringBuilder, SubCommandBuilder,
+    BooleanBuilder, ChannelBuilder, CommandBuilder, IntegerBuilder, StringBuilder,
+    SubCommandBuilder, UserBuilder,
 };
 use twilight_util::builder::interaction_response::ChannelMessageBuilder;
+
+use crate::storage::Quote;
 
 /// Discord's locale of the German texts. The English ones are the defaults.
 const GERMAN: &str = "de";
@@ -69,7 +80,183 @@ pub fn commands() -> Vec<Command> {
         .build(),
         dice(),
         poll(),
+        CommandBuilder::new(
+            "server",
+            Text::ServerDescription.render(Lang::En),
+            CommandType::ChatInput,
+        )
+        .description_localizations([(GERMAN, Text::ServerDescription.render(Lang::De))])
+        .contexts([InteractionContextType::Guild])
+        .build(),
+        CommandBuilder::new(
+            "user",
+            Text::UserDescription.render(Lang::En),
+            CommandType::ChatInput,
+        )
+        .name_localizations([(GERMAN, "nutzer")])
+        .description_localizations([(GERMAN, Text::UserDescription.render(Lang::De))])
+        .contexts([InteractionContextType::Guild])
+        .option(
+            UserBuilder::new("who", Text::UserWhoDescription.render(Lang::En))
+                .name_localizations([(GERMAN, "wer")])
+                .description_localizations([(GERMAN, Text::UserWhoDescription.render(Lang::De))]),
+        )
+        .build(),
+        game("coin", "münze", GameText::CoinDescription).build(),
+        game("8ball", "8kugel", GameText::EightBallDescription)
+            .option(
+                StringBuilder::new(
+                    "question",
+                    GameText::EightBallQuestionDescription.render(Lang::En),
+                )
+                .name_localizations([(GERMAN, "frage")])
+                .description_localizations([(
+                    GERMAN,
+                    GameText::EightBallQuestionDescription.render(Lang::De),
+                )])
+                .max_length(u16::try_from(poll::MAX_QUESTION).unwrap_or(u16::MAX)),
+            )
+            .build(),
+        game("rps", "ssp", GameText::RpsDescription).build(),
+        game("guess", "raten", GameText::GuessDescription)
+            .option(
+                IntegerBuilder::new("number", GameText::GuessNumberDescription.render(Lang::En))
+                    .name_localizations([(GERMAN, "zahl")])
+                    .description_localizations([(
+                        GERMAN,
+                        GameText::GuessNumberDescription.render(Lang::De),
+                    )])
+                    .min_value(1)
+                    .max_value(i64::from(Guessing::MAX)),
+            )
+            .option(
+                IntegerBuilder::new("max", GameText::GuessMaxDescription.render(Lang::En))
+                    .name_localizations([(GERMAN, "bis")])
+                    .description_localizations([(
+                        GERMAN,
+                        GameText::GuessMaxDescription.render(Lang::De),
+                    )])
+                    .min_value(2)
+                    .max_value(i64::from(Guessing::MAX)),
+            )
+            .build(),
+        save_quote(),
+        quote(),
+        github(),
     ]
+}
+
+/// /github, for people who may manage the server, as /settings: add a repository, with its
+/// channel, a branch and whether its releases are announced, too; remove one; and list them.
+fn github() -> Command {
+    let text = |text: GithubText<'_>| (text.render(Lang::En), text.render(Lang::De));
+    let repo = || {
+        let (english, german) = text(GithubText::RepoDescription);
+        StringBuilder::new("repo", english)
+            .description_localizations([(GERMAN, german)])
+            .required(true)
+            .max_length(200)
+    };
+    let subcommand = |name: &str, german_name: &str, description| {
+        let (english, german) = text(description);
+        SubCommandBuilder::new(name, english)
+            .name_localizations([(GERMAN, german_name)])
+            .description_localizations([(GERMAN, german)])
+    };
+    let (channel, german_channel) = text(GithubText::ChannelDescription);
+    let (branch, german_branch) = text(GithubText::BranchDescription);
+    let (releases, german_releases) = text(GithubText::ReleasesDescription);
+    let add = subcommand("add", "hinzufügen", GithubText::AddDescription)
+        .option(repo())
+        .option(
+            ChannelBuilder::new("channel", channel)
+                .name_localizations([(GERMAN, "kanal")])
+                .description_localizations([(GERMAN, german_channel)])
+                .required(true)
+                .channel_types([ChannelType::GuildText, ChannelType::GuildAnnouncement]),
+        )
+        .option(
+            StringBuilder::new("branch", branch)
+                .description_localizations([(GERMAN, german_branch)])
+                .max_length(u16::try_from(MAX_BRANCH).unwrap_or(u16::MAX)),
+        )
+        .option(
+            BooleanBuilder::new("releases", releases)
+                .description_localizations([(GERMAN, german_releases)]),
+        );
+    let remove = subcommand("remove", "entfernen", GithubText::RemoveDescription).option(repo());
+    let list = subcommand("list", "liste", GithubText::ListDescription);
+    let (description, german) = text(GithubText::GithubDescription);
+    CommandBuilder::new("github", description, CommandType::ChatInput)
+        .description_localizations([(GERMAN, german)])
+        .contexts([InteractionContextType::Guild])
+        .default_member_permissions(MAY_CHANGE_SETTINGS)
+        .option(add)
+        .option(remove)
+        .option(list)
+        .build()
+}
+
+/// The name of the command in the menu of messages, under Apps, that saves one as a quote.
+pub const SAVE_QUOTE: &str = "Save quote";
+
+/// Save quote, in German Zitat speichern, in the menu of messages. Such commands have no
+/// description.
+fn save_quote() -> Command {
+    CommandBuilder::new(SAVE_QUOTE, "", CommandType::Message)
+        .name_localizations([(GERMAN, "Zitat speichern")])
+        .contexts([InteractionContextType::Guild])
+        .build()
+}
+
+/// /quote, in German /zitat: show, with the number of a quote or without, and delete, with it.
+fn quote() -> Command {
+    let number = |required| {
+        IntegerBuilder::new("number", QuoteText::NumberDescription.render(Lang::En))
+            .name_localizations([(GERMAN, "nummer")])
+            .description_localizations([(GERMAN, QuoteText::NumberDescription.render(Lang::De))])
+            .min_value(1)
+            .max_value(i64::from(u32::MAX))
+            .required(required)
+    };
+    let show = SubCommandBuilder::new("show", QuoteText::ShowDescription.render(Lang::En))
+        .name_localizations([(GERMAN, "zeigen")])
+        .description_localizations([(GERMAN, QuoteText::ShowDescription.render(Lang::De))])
+        .option(number(false));
+    let delete = SubCommandBuilder::new("delete", QuoteText::DeleteDescription.render(Lang::En))
+        .name_localizations([(GERMAN, "löschen")])
+        .description_localizations([(GERMAN, QuoteText::DeleteDescription.render(Lang::De))])
+        .option(number(true));
+    CommandBuilder::new(
+        "quote",
+        QuoteText::QuoteDescription.render(Lang::En),
+        CommandType::ChatInput,
+    )
+    .name_localizations([(GERMAN, "zitat")])
+    .description_localizations([(GERMAN, QuoteText::QuoteDescription.render(Lang::De))])
+    .contexts([InteractionContextType::Guild])
+    .option(show)
+    .option(delete)
+    .build()
+}
+
+/// The slash command of a game, `name`, in German `german`, with its `description`.
+fn game(name: &str, german: &str, description: GameText<'_>) -> CommandBuilder {
+    CommandBuilder::new(name, description.render(Lang::En), CommandType::ChatInput)
+        .name_localizations([(GERMAN, german)])
+        .description_localizations([(GERMAN, description.render(Lang::De))])
+        .contexts([InteractionContextType::Guild])
+}
+
+/// The prefix of the IDs of the buttons of rock, paper, scissors, before the hand's.
+pub const RPS: &str = "rps:";
+
+/// When the thing with the ID `id` came to Discord, in seconds since 1970: Discord's IDs begin
+/// with the milliseconds since 2015.
+#[must_use]
+pub fn created(id: u64) -> i64 {
+    // At most 2^42 milliseconds, which an i64 holds.
+    (i64::try_from(id >> 22).unwrap_or(0) + 1_420_070_400_000) / 1000
 }
 
 /// /poll, in German /umfrage: the question, 2 to 10 answers, the hours, and whether people may
@@ -161,7 +348,7 @@ fn languages(option: StringBuilder) -> StringBuilder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request<'a> {
     /// An answer with this text.
-    Answer(Text<'static>),
+    Answer(Text<'a>),
     /// The language of the server: /settings language without `to`.
     ShowLanguage(Id<GuildMarker>),
     /// A new language for the server: /settings language with `to`.
@@ -173,6 +360,62 @@ pub enum Request<'a> {
     SetPrefix(Id<GuildMarker>, &'a str),
     /// A poll to post in the channel: /poll.
     Poll(Poll),
+    /// When the server was created, and how many members it has: /server.
+    ServerInfo(Id<GuildMarker>),
+    /// A coin: /coin.
+    Coin,
+    /// The magic 8-ball, with the question: /8ball.
+    EightBall(&'a str),
+    /// The buttons of rock, paper, scissors: /rps.
+    RpsChoose,
+    /// A game of rock, paper, scissors: someone clicked a button.
+    RpsPlay {
+        /// Their hand.
+        hand: Hand,
+        /// Their name.
+        player: &'a str,
+    },
+    /// Guessing a number: /guess.
+    Guess {
+        /// The guess, none to start a game, or to see the one that runs.
+        number: Option<u32>,
+        /// The largest number of a new game.
+        max: Option<u32>,
+        /// The name of the person who guessed.
+        player: &'a str,
+    },
+    /// A message to save as a quote on the server: Save quote, in the menu of a message.
+    SaveQuote(Id<GuildMarker>, Quote),
+    /// The quote of the server with this number, or one at random: /quote show.
+    ShowQuote(Id<GuildMarker>, Option<u32>),
+    /// Deleting a quote of the server: /quote delete.
+    DeleteQuote {
+        /// The server.
+        guild: Id<GuildMarker>,
+        /// The number of the quote.
+        number: u32,
+        /// The ID of the person who asked.
+        asker: u64,
+        /// Whether they may manage messages, and so delete any quote.
+        may_manage: bool,
+    },
+    /// Announcing a repository of GitHub on the server: /github add.
+    GithubAdd {
+        /// The server.
+        guild: Id<GuildMarker>,
+        /// The repository, as the person wrote it.
+        repo: &'a str,
+        /// The channel of the announcements.
+        channel: Id<ChannelMarker>,
+        /// The branch, none for the default branch.
+        branch: Option<&'a str>,
+        /// Whether its releases are announced, too.
+        releases: bool,
+    },
+    /// No longer announcing a repository, as the person wrote it, on the server: /github remove.
+    GithubRemove(Id<GuildMarker>, &'a str),
+    /// The repositories that the server announces: /github list.
+    GithubList(Id<GuildMarker>),
     /// A roll of `dice`, which only the asker sees if it is `secret`: /dice.
     Roll {
         /// What to roll.
@@ -207,39 +450,192 @@ pub fn request<'a>(
     interaction: &'a Interaction,
     guilds: &BTreeSet<Id<GuildMarker>>,
 ) -> Option<Asked<'a>> {
-    let Some(InteractionData::ApplicationCommand(command)) = &interaction.data else {
-        return None;
-    };
-    if interaction.kind != InteractionType::ApplicationCommand {
-        return None;
-    }
-    let request = match interaction.guild_id {
-        Some(guild) if guilds.contains(&guild) => match command.name.as_str() {
-            "info" => Request::Answer(Text::Info {
-                version: crate::VERSION,
-            }),
-            "settings" if may_change_settings(interaction) => settings(command, guild),
-            "settings" => Request::Answer(Text::NotAllowed),
-            "dice" => roll(command),
-            "poll" => poll_request(command),
-            _ => Request::Answer(Text::UnknownCommand),
-        },
-        _ => Request::Answer(Text::NotHere),
+    let on_server = interaction.guild_id.filter(|guild| guilds.contains(guild));
+    let request = match (&interaction.data, interaction.kind, on_server) {
+        (
+            Some(InteractionData::ApplicationCommand(command)),
+            InteractionType::ApplicationCommand,
+            Some(guild),
+        ) => slash(interaction, command, guild),
+        (
+            Some(InteractionData::MessageComponent(component)),
+            InteractionType::MessageComponent,
+            Some(_),
+        ) => {
+            let hand = component
+                .custom_id
+                .strip_prefix(RPS)
+                .and_then(Hand::from_id)?;
+            Request::RpsPlay {
+                hand,
+                player: name(interaction),
+            }
+        }
+        (
+            Some(InteractionData::ApplicationCommand(_) | InteractionData::MessageComponent(_)),
+            InteractionType::ApplicationCommand | InteractionType::MessageComponent,
+            None,
+        ) => Request::Answer(Text::NotHere),
+        _ => return None,
     };
     let lang = Lang::from_locale(interaction.locale.as_deref().unwrap_or_default());
     Some(Asked { request, lang })
 }
 
-/// Whether the person who sent `interaction` may manage its server, as Discord says, also
+/// The name of the person who sent `interaction`.
+fn name(interaction: &Interaction) -> &str {
+    interaction
+        .member
+        .as_ref()
+        .and_then(|member| member.user.as_ref())
+        .map_or("?", |user| {
+            user.global_name.as_deref().unwrap_or(&user.name)
+        })
+}
+
+/// What the slash command `command` on `guild` asks for.
+fn slash<'a>(
+    interaction: &'a Interaction,
+    command: &'a CommandData,
+    guild: Id<GuildMarker>,
+) -> Request<'a> {
+    match command.name.as_str() {
+        "info" => Request::Answer(Text::Info {
+            version: crate::VERSION,
+        }),
+        "settings" if may(interaction, MAY_CHANGE_SETTINGS) => settings(command, guild),
+        "settings" => Request::Answer(Text::NotAllowed),
+        "dice" => roll(command),
+        "poll" => poll_request(command),
+        "server" => Request::ServerInfo(guild),
+        "user" => user_info(interaction, command),
+        "coin" => Request::Coin,
+        "8ball" => Request::EightBall(string(&command.options, "question").unwrap_or_default()),
+        "rps" => Request::RpsChoose,
+        "guess" => Request::Guess {
+            number: number(&command.options, "number"),
+            max: number(&command.options, "max"),
+            player: name(interaction),
+        },
+        SAVE_QUOTE => quote_to_save(command, guild),
+        "quote" => quote_request(interaction, command, guild),
+        "github" if may(interaction, MAY_CHANGE_SETTINGS) => github_request(command, guild),
+        "github" => Request::Answer(Text::NotAllowed),
+        _ => Request::Answer(Text::UnknownCommand),
+    }
+}
+
+/// The text of the option `name` among `options`, none if there is none.
+fn string<'a>(options: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
+    options.iter().find_map(|option| match &option.value {
+        CommandOptionValue::String(text) if option.name == name => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+/// The whole number of the option `name` among `options`, none if there is none, or a negative
+/// one.
+fn number(options: &[CommandDataOption], name: &str) -> Option<u32> {
+    options.iter().find_map(|option| match option.value {
+        CommandOptionValue::Integer(value) if option.name == name => u32::try_from(value).ok(),
+        _ => None,
+    })
+}
+
+/// Whether the person who sent `interaction` has `permission` there, as Discord says, also
 /// through the permission Administrator.
-fn may_change_settings(interaction: &Interaction) -> bool {
+fn may(interaction: &Interaction, permission: Permissions) -> bool {
     interaction
         .member
         .as_ref()
         .and_then(|member| member.permissions)
-        .is_some_and(|permissions| {
-            permissions.intersects(MAY_CHANGE_SETTINGS | Permissions::ADMINISTRATOR)
-        })
+        .is_some_and(|permissions| permissions.intersects(permission | Permissions::ADMINISTRATOR))
+}
+
+/// Save quote on `guild`: the message, which Discord sends with the command. One that isn't
+/// there counts as one without text.
+fn quote_to_save(command: &CommandData, guild: Id<GuildMarker>) -> Request<'static> {
+    let message = command
+        .target_id
+        .and_then(|target| command.resolved.as_ref()?.messages.get(&target.cast()));
+    let quote = message.map_or_else(Quote::default, |message| {
+        let author = &message.author;
+        Quote {
+            author: author.id.get(),
+            name: author
+                .global_name
+                .as_deref()
+                .unwrap_or(&author.name)
+                .to_owned(),
+            channel: message.channel_id.get(),
+            message: message.id.get(),
+            text: message.content.clone(),
+        }
+    });
+    Request::SaveQuote(guild, quote)
+}
+
+/// /github on `guild`: add, with the repository and the channel, and maybe a branch and whether
+/// the releases are announced, too, by default they are; remove, with the repository; and
+/// list. Any other shape is of another version of the command.
+fn github_request(command: &CommandData, guild: Id<GuildMarker>) -> Request<'_> {
+    let [
+        CommandDataOption {
+            name,
+            value: CommandOptionValue::SubCommand(options),
+        },
+    ] = command.options.as_slice()
+    else {
+        return Request::Answer(Text::UnknownCommand);
+    };
+    let channel = options.iter().find_map(|option| match option.value {
+        CommandOptionValue::Channel(channel) if option.name == "channel" => Some(channel),
+        _ => None,
+    });
+    let releases = options.iter().find_map(|option| match option.value {
+        CommandOptionValue::Boolean(releases) if option.name == "releases" => Some(releases),
+        _ => None,
+    });
+    match (name.as_str(), string(options, "repo"), channel) {
+        ("add", Some(repo), Some(channel)) => Request::GithubAdd {
+            guild,
+            repo,
+            channel,
+            branch: string(options, "branch"),
+            releases: releases.unwrap_or(true),
+        },
+        ("remove", Some(repo), _) => Request::GithubRemove(guild, repo),
+        ("list", _, _) => Request::GithubList(guild),
+        _ => Request::Answer(Text::UnknownCommand),
+    }
+}
+
+/// /quote on `guild`: show, with the number of a quote or without, and delete, with it. Any
+/// other shape is of another version of the command.
+fn quote_request(
+    interaction: &Interaction,
+    command: &CommandData,
+    guild: Id<GuildMarker>,
+) -> Request<'static> {
+    let [
+        CommandDataOption {
+            name,
+            value: CommandOptionValue::SubCommand(options),
+        },
+    ] = command.options.as_slice()
+    else {
+        return Request::Answer(Text::UnknownCommand);
+    };
+    match (name.as_str(), number(options, "number")) {
+        ("show", number) => Request::ShowQuote(guild, number),
+        ("delete", Some(number)) => Request::DeleteQuote {
+            guild,
+            number,
+            asker: interaction.author_id().map_or(0, Id::get),
+            may_manage: may(interaction, Permissions::MANAGE_MESSAGES),
+        },
+        _ => Request::Answer(Text::UnknownCommand),
+    }
 }
 
 /// /settings on `guild`: its subcommands language and prefix, with the option `to` or without.
@@ -297,6 +693,37 @@ fn roll(command: &CommandData) -> Request<'static> {
     }
 }
 
+/// /user: since when the person in the option `who`, or who asked, is on Discord and on the
+/// server. Discord sends the person with the command.
+fn user_info<'a>(interaction: &'a Interaction, command: &'a CommandData) -> Request<'a> {
+    let who =
+        command
+            .options
+            .iter()
+            .find_map(|option| match (option.name.as_str(), &option.value) {
+                ("who", CommandOptionValue::User(user)) => Some(*user),
+                _ => None,
+            });
+    let (user, joined) = if let Some(who) = who {
+        let resolved = command.resolved.as_ref();
+        let user = resolved.and_then(|resolved| resolved.users.get(&who));
+        let member = resolved.and_then(|resolved| resolved.members.get(&who));
+        (user, member.and_then(|member| member.joined_at))
+    } else {
+        let member = interaction.member.as_ref();
+        let user = member.and_then(|member| member.user.as_ref());
+        (user, member.and_then(|member| member.joined_at))
+    };
+    let Some(user) = user else {
+        return Request::Answer(Text::UnknownCommand);
+    };
+    Request::Answer(Text::UserInfo {
+        name: user.global_name.as_deref().unwrap_or(&user.name),
+        created: created(user.id.get()),
+        joined: joined.map(Timestamp::as_secs),
+    })
+}
+
 /// /poll: the question, the answers in the order of their numbers, the hours, and whether
 /// people may choose more than one answer. Any other option is of another version of the
 /// command.
@@ -331,17 +758,102 @@ fn poll_request(command: &CommandData) -> Request<'static> {
     }
 }
 
-/// The answer with `content` for `audience`, which mentions nobody.
+/// An answer of PuppyBot to an interaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    /// The text.
+    pub content: String,
+    /// Who sees it.
+    pub audience: Audience,
+    /// Buttons under the text: their IDs and labels.
+    pub buttons: Vec<(String, String)>,
+    /// Whether it takes the place of the message whose button someone clicked.
+    pub update: bool,
+}
+
+impl Answer {
+    /// An answer with `content` for `audience`, without buttons.
+    #[must_use]
+    pub const fn new(content: String, audience: Audience) -> Self {
+        Self {
+            content,
+            audience,
+            buttons: Vec::new(),
+            update: false,
+        }
+    }
+}
+
+/// The response with `answer`, which mentions nobody.
 #[must_use]
-pub fn response(content: String, audience: Audience) -> InteractionResponse {
+pub fn response(answer: Answer) -> InteractionResponse {
     let message = ChannelMessageBuilder::new()
-        .content(content)
-        .allowed_mentions(AllowedMentions::default());
-    match audience {
+        .content(answer.content)
+        .allowed_mentions(AllowedMentions::default())
+        .components(buttons(&answer.buttons));
+    let mut response = match answer.audience {
         Audience::Asker => message.flags(MessageFlags::EPHEMERAL),
         Audience::Everyone => message,
     }
-    .build()
+    .build();
+    if answer.update {
+        response.kind = InteractionResponseType::UpdateMessage;
+    }
+    response
+}
+
+/// The first response to a command that takes longer than Discord waits, 3 seconds: that
+/// PuppyBot is working on it, which only the person who asked sees. The answer follows.
+#[must_use]
+pub fn working() -> InteractionResponse {
+    InteractionResponse {
+        kind: InteractionResponseType::DeferredChannelMessageWithSource,
+        data: Some(InteractionResponseData {
+            flags: Some(MessageFlags::EPHEMERAL),
+            ..InteractionResponseData::default()
+        }),
+    }
+}
+
+/// A row of buttons with these IDs and labels, none if there are none.
+#[must_use]
+pub fn buttons(buttons: &[(String, String)]) -> Vec<Component> {
+    if buttons.is_empty() {
+        return Vec::new();
+    }
+    let row = buttons
+        .iter()
+        .map(|(id, label)| {
+            Component::Button(Button {
+                custom_id: Some(id.clone()),
+                disabled: false,
+                emoji: None,
+                id: None,
+                label: Some(label.clone()),
+                sku_id: None,
+                style: ButtonStyle::Primary,
+                url: None,
+            })
+        })
+        .collect();
+    vec![Component::ActionRow(ActionRow {
+        components: row,
+        id: None,
+    })]
+}
+
+/// The buttons of rock, paper, scissors, labeled in `lang`.
+#[must_use]
+pub fn rps_buttons(lang: Lang) -> Vec<(String, String)> {
+    Hand::ALL
+        .into_iter()
+        .map(|hand| {
+            (
+                format!("{RPS}{}", hand.id()),
+                GameText::Hand(hand).render(lang),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -411,6 +923,18 @@ pub(crate) mod tests {
         locale: &str,
         permissions: u64,
     ) -> Interaction {
+        resolved(name, options, "null", locale, permissions)
+    }
+
+    /// [`command`], with `resolved`, as JSON: what Discord sends of the people, channels or
+    /// messages in the options.
+    pub(crate) fn resolved(
+        name: &str,
+        options: &str,
+        resolved: &str,
+        locale: &str,
+        permissions: u64,
+    ) -> Interaction {
         serde_json::from_str(&format!(
             r#"{{
                 "id": "1200000000000000001",
@@ -430,7 +954,7 @@ pub(crate) mod tests {
                         "discriminator": "0", "avatar": null}}
                 }},
                 "data": {{"id": "1200000000000000004", "name": "{name}", "type": 1,
-                    "options": {options}}}
+                    "options": {options}, "resolved": {resolved}}}
             }}"#
         ))
         .unwrap()
@@ -662,15 +1186,190 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_server_and_people() {
+        assert_eq!(
+            asked(&command("server", "[]", "de", 0)).0,
+            Request::ServerInfo(Id::new(GUILD))
+        );
+        // Who asked, without the option.
+        assert_eq!(
+            asked(&command("user", "[]", "de", 0)).0,
+            Request::Answer(Text::UserInfo {
+                name: "puppy",
+                created: 1_753_856_410,
+                joined: None
+            })
+        );
+        // Someone else, whom Discord sends with the command.
+        let who = r#"[{"name": "who", "type": 6, "value": "1100000000000000001"}]"#;
+        let people = r#"{"users": {"1100000000000000001": {"id": "1100000000000000001",
+            "username": "rex", "global_name": "Rex", "discriminator": "0", "avatar": null}},
+            "members": {"1100000000000000001": {"roles": [], "flags": 0, "pending": false,
+            "permissions": "0", "joined_at": "2026-01-01T00:00:00.000000+00:00"}}}"#;
+        assert_eq!(
+            asked(&resolved("user", who, people, "de", 0)).0,
+            Request::Answer(Text::UserInfo {
+                name: "Rex",
+                created: 1_682_330_837,
+                joined: Some(1_767_225_600)
+            })
+        );
+        // Unless Discord didn't.
+        assert_eq!(
+            asked(&command("user", who, "de", 0)).0,
+            Request::Answer(Text::UnknownCommand)
+        );
+        // An option of another version doesn't name anyone: who asked.
+        let other = r#"[{"name": "colour", "type": 3, "value": "red"}]"#;
+        assert_eq!(
+            asked(&command("user", other, "de", 0)).0,
+            Request::Answer(Text::UserInfo {
+                name: "puppy",
+                created: 1_753_856_410,
+                joined: None
+            })
+        );
+        let mut without_member = command("user", "[]", "de", 0);
+        without_member.member = None;
+        assert_eq!(
+            asked(&without_member).0,
+            Request::Answer(Text::UnknownCommand)
+        );
+    }
+
+    #[test]
+    fn when_things_came_to_discord() {
+        // Discord's epoch, 2015, and the last millisecond that its IDs can hold.
+        assert_eq!(created(0), 1_420_070_400);
+        assert_eq!(created(u64::MAX), 5_818_116_911);
+    }
+
+    /// A click on the button `id` on the server `guild`, as Discord sends it.
+    fn button(id: &str, guild: u64) -> Interaction {
+        serde_json::from_str(&format!(
+            r#"{{"id": "1200000000000000001", "application_id": "1200000000000000002", "type": 3,
+            "token": "interaction-token", "version": 1, "locale": "de",
+            "attachment_size_limit": 26214400, "authorizing_integration_owners": {{}},
+            "entitlements": [], "guild_id": "{guild}",
+            "member": {{"deaf": false, "mute": false, "flags": 0, "roles": [], "joined_at": null,
+                "permissions": "0", "user": {{"id": "1400000000000000005", "username": "puppy",
+                "global_name": "Puppy", "discriminator": "0", "avatar": null}}}},
+            "data": {{"custom_id": "{id}", "component_type": 2}}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn games() {
+        let game = |name, options| command(name, options, "de", 0);
+        assert_eq!(asked(&game("coin", "[]")).0, Request::Coin);
+        let question = r#"[{"name": "question", "type": 3, "value": "Sonne?"}]"#;
+        assert_eq!(
+            asked(&game("8ball", question)).0,
+            Request::EightBall("Sonne?")
+        );
+        assert_eq!(asked(&game("8ball", "[]")).0, Request::EightBall(""));
+        // A question that isn't a text, which Discord doesn't send: as none.
+        let question = r#"[{"name": "question", "type": 4, "value": 8}]"#;
+        assert_eq!(asked(&game("8ball", question)).0, Request::EightBall(""));
+        assert_eq!(asked(&game("rps", "[]")).0, Request::RpsChoose);
+        let options = r#"[{"name": "number", "type": 4, "value": 42}, {"name": "max", "type": 4, "value": 50}]"#;
+        assert_eq!(
+            asked(&game("guess", options)).0,
+            Request::Guess {
+                number: Some(42),
+                max: Some(50),
+                player: "puppy"
+            }
+        );
+        // Discord's limits don't allow negative numbers: as none.
+        let options = r#"[{"name": "number", "type": 4, "value": -1}, {"name": "max", "type": 3, "value": "x"}]"#;
+        assert_eq!(
+            asked(&game("guess", options)).0,
+            Request::Guess {
+                number: None,
+                max: None,
+                player: "puppy"
+            }
+        );
+    }
+
+    #[test]
+    fn buttons_of_rock_paper_scissors() {
+        assert_eq!(
+            asked(&button("rps:rock", GUILD)).0,
+            Request::RpsPlay {
+                hand: Hand::Rock,
+                player: "Puppy"
+            }
+        );
+        // Of no game, or outside the servers.
+        assert_eq!(request(&button("rps:lizard", GUILD), &guilds()), None);
+        assert_eq!(request(&button("other", GUILD), &guilds()), None);
+        assert_eq!(
+            asked(&button("rps:rock", GUILD + 1)).0,
+            Request::Answer(Text::NotHere)
+        );
+        let mut nobody = button("rps:paper", GUILD);
+        nobody.member = None;
+        assert_eq!(
+            asked(&nobody).0,
+            Request::RpsPlay {
+                hand: Hand::Paper,
+                player: "?"
+            }
+        );
+    }
+
+    #[test]
+    fn answers_with_buttons() {
+        // The buttons, and the answer that takes the place of their message.
+        let answer = Answer {
+            buttons: rps_buttons(Lang::En),
+            update: true,
+            ..Answer::new("Rock, paper or scissors?".to_owned(), Audience::Everyone)
+        };
+        let response = response(answer);
+        assert_eq!(response.kind, InteractionResponseType::UpdateMessage);
+        let components = response.data.unwrap().components.unwrap();
+        let button = |id: &str, label: &str| {
+            Component::Button(Button {
+                custom_id: Some(id.to_owned()),
+                disabled: false,
+                emoji: None,
+                id: None,
+                label: Some(label.to_owned()),
+                sku_id: None,
+                style: ButtonStyle::Primary,
+                url: None,
+            })
+        };
+        assert_eq!(
+            components,
+            [Component::ActionRow(ActionRow {
+                components: vec![
+                    button("rps:rock", "Rock"),
+                    button("rps:paper", "Paper"),
+                    button("rps:scissors", "Scissors"),
+                ],
+                id: None,
+            })]
+        );
+        assert_eq!(buttons(&[]), []);
+    }
+
+    #[test]
     fn answers_for_everyone_in_the_channel() {
-        let data = response("4".to_owned(), Audience::Everyone).data.unwrap();
+        let data = response(Answer::new("4".to_owned(), Audience::Everyone))
+            .data
+            .unwrap();
         assert_eq!(data.flags, None);
         assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
     }
 
     #[test]
     fn answers_only_for_the_person_who_asked() {
-        let response = response(Text::NotHere.render(Lang::En), Audience::Asker);
+        let response = response(Answer::new(Text::NotHere.render(Lang::En), Audience::Asker));
         assert_eq!(
             response.kind,
             InteractionResponseType::ChannelMessageWithSource
@@ -761,12 +1460,51 @@ pub(crate) mod tests {
             .iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, ["info", "settings", "dice", "poll"]);
+        assert_eq!(
+            names,
+            [
+                "info", "settings", "dice", "poll", "server", "user", "coin", "8ball", "rps",
+                "guess", SAVE_QUOTE, "quote", "github"
+            ]
+        );
         for command in &commands {
-            let german = &command.description_localizations.as_ref().unwrap()["de"];
-            assert_ne!(&command.description, german);
             assert_eq!(command.contexts, Some(vec![InteractionContextType::Guild]));
         }
+        let slash = commands
+            .iter()
+            .filter(|command| command.kind == CommandType::ChatInput);
+        for command in slash {
+            let german = &command.description_localizations.as_ref().unwrap()["de"];
+            assert_ne!(&command.description, german);
+        }
+        // In the menu of messages, without a description.
+        let save = &commands[10];
+        assert_eq!(
+            (save.kind, save.description.as_str()),
+            (CommandType::Message, "")
+        );
+        assert_eq!(
+            save.name_localizations.as_ref().unwrap()["de"],
+            "Zitat speichern"
+        );
+        // /quote show with a number or without, /quote delete with it.
+        let quote = &commands[11];
+        let subcommands: Vec<_> = quote
+            .options
+            .iter()
+            .map(|subcommand| {
+                let number = &subcommand.options.as_ref().unwrap()[0];
+                let german = &subcommand.name_localizations.as_ref().unwrap()["de"];
+                (subcommand.name.as_str(), german.as_str(), number.required)
+            })
+            .collect();
+        assert_eq!(
+            subcommands,
+            [
+                ("show", "zeigen", Some(false)),
+                ("delete", "löschen", Some(true))
+            ]
+        );
         let (info, settings) = (&commands[0], &commands[1]);
         assert_eq!(
             info.description,
@@ -818,5 +1556,176 @@ pub(crate) mod tests {
         );
         // Any text, no choices.
         assert!(to.choices.as_ref().is_none_or(Vec::is_empty));
+    }
+
+    /// The message of the tests, as Discord sends it with Save quote.
+    const MESSAGE: &str = r#"{"messages": {"1300000000000000020": {"id": "1300000000000000020",
+        "channel_id": "1300000000000000004", "content": "Wuff!", "type": 0, "flags": 0,
+        "author": {"id": "1100000000000000009", "username": "rex", "global_name": "Rex",
+            "discriminator": "0", "avatar": null},
+        "timestamp": "2026-11-08T12:00:00.000000+00:00", "edited_timestamp": null,
+        "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+        "attachments": [], "embeds": [], "components": [], "pinned": false}}}"#;
+
+    /// Save quote, in the menu of the message 1300000000000000020, with what Discord sends of
+    /// the messages, as JSON.
+    fn saving(messages: &str) -> Interaction {
+        let mut interaction = resolved(SAVE_QUOTE, "[]", messages, "de", 0);
+        if let Some(InteractionData::ApplicationCommand(command)) = &mut interaction.data {
+            command.kind = CommandType::Message;
+            command.target_id = Some(Id::new(1_300_000_000_000_000_020));
+        }
+        interaction
+    }
+
+    #[test]
+    fn saving_quotes() {
+        let guild = Id::new(GUILD);
+        let quote = Quote {
+            author: 1_100_000_000_000_000_009,
+            name: "Rex".to_owned(),
+            channel: 1_300_000_000_000_000_004,
+            message: 1_300_000_000_000_000_020,
+            text: "Wuff!".to_owned(),
+        };
+        let interaction = saving(MESSAGE);
+        assert_eq!(asked(&interaction).0, Request::SaveQuote(guild, quote));
+        // A message that Discord didn't send counts as one without text.
+        let interaction = saving("null");
+        assert_eq!(
+            asked(&interaction).0,
+            Request::SaveQuote(guild, Quote::default())
+        );
+    }
+
+    #[test]
+    fn showing_and_deleting_quotes() {
+        let guild = Id::new(GUILD);
+        let subcommand = |name: &str, options: &str| {
+            format!(r#"[{{"name": "{name}", "type": 1, "options": {options}}}]"#)
+        };
+        let number = r#"[{"name": "number", "type": 4, "value": 3}]"#;
+        let interaction = command("quote", &subcommand("show", "[]"), "de", 0);
+        assert_eq!(asked(&interaction).0, Request::ShowQuote(guild, None));
+        let interaction = command("quote", &subcommand("show", number), "de", 0);
+        assert_eq!(asked(&interaction).0, Request::ShowQuote(guild, Some(3)));
+        // Whether the person who asked may delete the quotes of others.
+        let delete = subcommand("delete", number);
+        let manage_messages = Permissions::MANAGE_MESSAGES.bits();
+        for (permissions, may_manage) in [(0, false), (manage_messages, true)] {
+            let interaction = command("quote", &delete, "de", permissions);
+            assert_eq!(
+                asked(&interaction).0,
+                Request::DeleteQuote {
+                    guild,
+                    number: 3,
+                    asker: 1_400_000_000_000_000_005,
+                    may_manage
+                }
+            );
+        }
+        // Other shapes, of other versions of the command.
+        for options in [
+            "[]".to_owned(),
+            subcommand("delete", "[]"),
+            subcommand("edit", "[]"),
+        ] {
+            let interaction = command("quote", &options, "de", 0);
+            assert_eq!(
+                asked(&interaction).0,
+                Request::Answer(Text::UnknownCommand),
+                "{options}"
+            );
+        }
+    }
+
+    #[test]
+    fn github() {
+        let working = working();
+        assert_eq!(
+            working.kind,
+            InteractionResponseType::DeferredChannelMessageWithSource
+        );
+        assert_eq!(
+            working.data.and_then(|data| data.flags),
+            Some(MessageFlags::EPHEMERAL)
+        );
+        let guild = Id::new(GUILD);
+        let subcommand = |name: &str, options: &str| {
+            format!(r#"[{{"name": "{name}", "type": 1, "options": {options}}}]"#)
+        };
+        let add = |options: &str| subcommand("add", options);
+        let full = add(r#"[{"name": "repo", "type": 3, "value": "a/b"},
+            {"name": "channel", "type": 7, "value": "1300000000000000004"},
+            {"name": "branch", "type": 3, "value": "dev"},
+            {"name": "releases", "type": 5, "value": false}]"#);
+        let interaction = command("github", &full, "de", MANAGE_GUILD);
+        assert_eq!(
+            asked(&interaction).0,
+            Request::GithubAdd {
+                guild,
+                repo: "a/b",
+                channel: Id::new(1_300_000_000_000_000_004),
+                branch: Some("dev"),
+                releases: false,
+            }
+        );
+        // Without a branch, and with the releases.
+        let short = add(
+            r#"[{"name": "channel", "type": 7, "value": "1300000000000000004"},
+            {"name": "repo", "type": 3, "value": "a/b"}]"#,
+        );
+        let interaction = command("github", &short, "de", MANAGE_GUILD);
+        assert_eq!(
+            asked(&interaction).0,
+            Request::GithubAdd {
+                guild,
+                repo: "a/b",
+                channel: Id::new(1_300_000_000_000_000_004),
+                branch: None,
+                releases: true,
+            }
+        );
+        let remove = subcommand("remove", r#"[{"name": "repo", "type": 3, "value": "a/b"}]"#);
+        let interaction = command("github", &remove, "de", MANAGE_GUILD);
+        assert_eq!(asked(&interaction).0, Request::GithubRemove(guild, "a/b"));
+        let list = subcommand("list", "[]");
+        let interaction = command("github", &list, "de", MANAGE_GUILD);
+        assert_eq!(asked(&interaction).0, Request::GithubList(guild));
+        // Only for people who may manage the server, and only as Discord knows it.
+        let interaction = command("github", &list, "de", 0);
+        assert_eq!(asked(&interaction).0, Request::Answer(Text::NotAllowed));
+        let without_channel = add(r#"[{"name": "repo", "type": 3, "value": "a/b"}]"#);
+        for options in ["[]".to_owned(), without_channel, subcommand("remove", "[]")] {
+            let interaction = command("github", &options, "de", MANAGE_GUILD);
+            assert_eq!(
+                asked(&interaction).0,
+                Request::Answer(Text::UnknownCommand),
+                "{options}"
+            );
+        }
+        // The command, for people who may manage the server.
+        let commands = commands();
+        let github = &commands[12];
+        assert_eq!(
+            github.default_member_permissions,
+            Some(Permissions::MANAGE_GUILD)
+        );
+        let names: Vec<_> = github
+            .options
+            .iter()
+            .map(|subcommand| subcommand.name.as_str())
+            .collect();
+        assert_eq!(names, ["add", "remove", "list"]);
+    }
+
+    /// As Discord takes them, which the fake Discord of the tests doesn't check: names,
+    /// descriptions, their translations and the options within Discord's rules.
+    #[test]
+    fn discord_takes_the_commands() {
+        for command in commands() {
+            twilight_validate::command::command(&command).unwrap();
+            twilight_validate::command::options(&command.options).unwrap();
+        }
     }
 }

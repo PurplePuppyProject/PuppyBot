@@ -7,7 +7,10 @@
 //! without I/O; `make lint` checks that.
 
 pub mod dice;
+pub mod games;
+pub mod github;
 pub mod i18n;
 pub mod poll;
+pub mod quotes;
 pub mod text;
 pub mod text_command;

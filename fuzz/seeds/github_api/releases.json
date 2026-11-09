@@ -1,0 +1,50 @@
+[
+ {
+  "id": 2,
+  "tag_name": "v0.2.0",
+  "target_commitish": "main",
+  "name": "Games and quotes",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-11-08T12:00:00Z",
+  "author": {
+   "login": "rex",
+   "id": 1,
+   "type": "User",
+   "site_admin": false
+  },
+  "html_url": "https://github.com/PurplePuppyProject/PuppyBot/releases/tag/v0.2.0"
+ },
+ {
+  "id": 3,
+  "tag_name": "v0.3.0",
+  "target_commitish": "main",
+  "name": null,
+  "draft": true,
+  "prerelease": false,
+  "created_at": "2026-11-08T12:00:00Z",
+  "author": {
+   "login": "rex",
+   "id": 1,
+   "type": "User",
+   "site_admin": false
+  },
+  "html_url": "https://github.com/PurplePuppyProject/PuppyBot/releases/tag/v0.3.0"
+ },
+ {
+  "id": 1,
+  "tag_name": "v0.1.0",
+  "target_commitish": "main",
+  "name": null,
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-11-08T12:00:00Z",
+  "author": {
+   "login": "rex",
+   "id": 1,
+   "type": "User",
+   "site_admin": false
+  },
+  "html_url": "https://github.com/PurplePuppyProject/PuppyBot/releases/tag/v0.1.0"
+ }
+]

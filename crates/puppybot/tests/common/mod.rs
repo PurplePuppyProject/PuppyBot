@@ -210,19 +210,68 @@ pub fn guild_create(guild: u64) -> Send {
 /// The slash command `name` with `options`, as JSON, on [`GUILD`], by someone with the locale
 /// `locale` and the permissions `permissions`. PuppyBot answers it at [`COMMAND_ANSWER`].
 pub fn slash(name: &str, options: &str, locale: &str, permissions: u64) -> Send {
+    let data = format!(
+        r#"{{"id": "1200000000000000007", "name": "{name}", "type": 1, "options": {options}}}"#
+    );
+    in_channel(
+        "1200000000000000006",
+        "command-token",
+        2,
+        locale,
+        permissions,
+        &data,
+    )
+}
+
+/// A click on the button `custom_id` of a message in [`CHANNEL`] on [`GUILD`], by someone with
+/// the locale `locale`. PuppyBot answers it at [`BUTTON_ANSWER`].
+pub fn button(custom_id: &str, locale: &str) -> Send {
+    let data = format!(r#"{{"custom_id": "{custom_id}", "component_type": 2}}"#);
+    in_channel("1200000000000000008", "button-token", 3, locale, 0, &data)
+}
+
+/// Save quote, in the menu of the message `id` with `content` in [`CHANNEL`] by the person
+/// Rex, as someone with `locale` uses it. PuppyBot answers it at [`COMMAND_ANSWER`].
+pub fn save_quote(id: u64, content: &str, locale: &str) -> Send {
+    let content = serde_json::to_string(content).unwrap();
+    let message = format!(
+        r#"{{"id": "{id}", "channel_id": "{CHANNEL}", "content": {content}, "type": 0,
+        "flags": 0, "author": {{"id": "1100000000000000009", "username": "rex",
+            "global_name": "Rex", "discriminator": "0", "avatar": null}},
+        "timestamp": "2026-11-08T12:00:00.000000+00:00", "edited_timestamp": null,
+        "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+        "attachments": [], "embeds": [], "components": [], "pinned": false}}"#
+    );
+    let data = format!(
+        r#"{{"id": "1200000000000000009", "name": "Save quote", "type": 3, "target_id": "{id}",
+        "resolved": {{"messages": {{"{id}": {message}}}}}}}"#
+    );
+    in_channel("1200000000000000006", "command-token", 2, locale, 0, &data)
+}
+
+/// The event `MESSAGE_DELETE` of the message `id` in [`CHANNEL`] on [`GUILD`].
+pub fn message_delete(id: u64) -> Send {
+    Send::Dispatch(
+        "MESSAGE_DELETE",
+        format!(r#"{{"id": "{id}", "channel_id": "{CHANNEL}", "guild_id": "{GUILD}"}}"#),
+    )
+}
+
+/// The event `INTERACTION_CREATE` of the interaction `id` with `token` and `data`, of the type
+/// `kind`, in [`CHANNEL`] on [`GUILD`], by the member `puppy` with `locale` and `permissions`.
+fn in_channel(id: &str, token: &str, kind: u8, locale: &str, permissions: u64, data: &str) -> Send {
     Send::Dispatch(
         "INTERACTION_CREATE",
         format!(
-            r#"{{"id": "1200000000000000006", "application_id": "{APPLICATION}", "type": 2,
-            "token": "command-token", "version": 1, "locale": "{locale}",
+            r#"{{"id": "{id}", "application_id": "{APPLICATION}", "type": {kind},
+            "token": "{token}", "version": 1, "locale": "{locale}",
             "guild_id": "{GUILD}", "attachment_size_limit": 26214400,
             "channel": {{"id": "{CHANNEL}", "type": 0, "guild_id": "{GUILD}"}},
             "authorizing_integration_owners": {{}}, "entitlements": [],
             "member": {{"deaf": false, "mute": false, "flags": 0, "roles": [], "joined_at": null,
                 "permissions": "{permissions}", "user": {{"id": "1400000000000000005",
                 "username": "puppy", "discriminator": "0", "avatar": null}}}},
-            "data": {{"id": "1200000000000000007", "name": "{name}", "type": 1,
-                "options": {options}}}}}"#
+            "data": {data}}}"#
         ),
     )
 }
@@ -239,6 +288,10 @@ pub fn settings(subcommand: &str, to: Option<&str>, locale: &str, permissions: u
 /// Where PuppyBot answers [`slash`].
 pub const COMMAND_ANSWER: &str =
     "POST /api/v10/interactions/1200000000000000006/command-token/callback";
+
+/// Where PuppyBot answers [`button`].
+pub const BUTTON_ANSWER: &str =
+    "POST /api/v10/interactions/1200000000000000008/button-token/callback";
 
 /// The channel of the messages of the tests, see [`message`].
 pub const CHANNEL: u64 = 1_300_000_000_000_000_004;
@@ -456,6 +509,17 @@ async fn connection(stream: TcpStream, script: Arc<Vec<Send>>, received: Arc<Mut
     let _ = socket.close().await;
 }
 
+/// The server [`GUILD`], as Discord's API sends it with its counts.
+const SERVER: &str = r#"{"id": "1100000000000000001", "name": "Purple Puppies", "icon": null,
+    "owner_id": "1400000000000000005", "afk_channel_id": null, "afk_timeout": 300,
+    "verification_level": 0, "default_message_notifications": 0, "explicit_content_filter": 0,
+    "roles": [], "emojis": [], "features": [], "mfa_level": 0, "application_id": null,
+    "system_channel_id": null, "system_channel_flags": 0, "rules_channel_id": null,
+    "vanity_url_code": null, "description": null, "banner": null, "premium_tier": 0,
+    "preferred_locale": "de", "public_updates_channel_id": null, "nsfw_level": 0,
+    "premium_progress_bar_enabled": false, "stickers": [], "approximate_member_count": 42,
+    "approximate_presence_count": 7}"#;
+
 /// Records a request to the API, and answers it as Discord would, or with `failing`.
 async fn answer(
     request: hyper::Request<Incoming>,
@@ -473,6 +537,7 @@ async fn answer(
     let (status, reply) = match failing {
         Some(status) => (status, r#"{"message": "Invalid Form Body", "code": 50035}"#),
         None if path.ends_with("/commands") => (200, "[]"),
+        None if method == "GET" && path.starts_with("/api/v10/guilds/") => (200, SERVER),
         None => (204, ""),
     };
     requests
@@ -484,4 +549,77 @@ async fn answer(
         .header("content-type", "application/json")
         .body(Full::new(Bytes::from(reply)))
         .unwrap())
+}
+
+/// GitHub on this machine: an API that answers each path with what [`FakeGithub::answer`] set
+/// for it, or 404, and records the paths that it got.
+pub struct FakeGithub {
+    runtime: tokio::runtime::Runtime,
+    pub url: String,
+    routes: Arc<Mutex<std::collections::BTreeMap<String, (u16, String)>>>,
+    got: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeGithub {
+    /// Starts it, with no answers yet.
+    pub fn start() -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let routes = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let (server_routes, server_got) = (Arc::clone(&routes), Arc::clone(&got));
+        runtime.spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (routes, got) = (Arc::clone(&server_routes), Arc::clone(&server_got));
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: hyper::Request<Incoming>| {
+                        let path = request.uri().path_and_query().unwrap().to_string();
+                        got.lock().unwrap().push(path.clone());
+                        let (status, body) = routes
+                            .lock()
+                            .unwrap()
+                            .get(&path)
+                            .cloned()
+                            .unwrap_or((404, r#"{"message": "Not Found"}"#.to_owned()));
+                        async move {
+                            Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(status)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(Bytes::from(body)))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        Self {
+            runtime,
+            url,
+            routes,
+            got,
+        }
+    }
+
+    /// From now on, answers `path` with `status` and `body`.
+    pub fn answer(&self, path: &str, status: u16, body: &str) {
+        self.routes
+            .lock()
+            .unwrap()
+            .insert(path.to_owned(), (status, body.to_owned()));
+    }
+
+    /// The paths that it got so far.
+    pub fn got(&self) -> Vec<String> {
+        self.got.lock().unwrap().clone()
+    }
 }

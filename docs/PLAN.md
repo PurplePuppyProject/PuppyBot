@@ -9,7 +9,7 @@ What was decided in the planning of PuppyBot on 2026-11-07, with the versions of
 - **The first version:**
   - Community and onboarding: welcome messages, self-roles with buttons or menus, confirming the rules, events and reminders.
   - Utility and fun: dice, polls, info commands, quotes, small games.
-  - Integrations: new entries of RSS and Atom feeds, YouTube channels (through their feeds), Twitch streams (Helix API with an app token) and GitHub (Atom feeds of releases and commits), posted to channels.
+  - Integrations: new entries of RSS and Atom feeds, YouTube channels (through their feeds), Twitch streams (Helix API with an app token) and GitHub (commits and releases, through its REST API, see `feature/github_notifications`), posted to channels.
   - Not in the first version: moderation, voice and music. Since March 2026, Discord requires end-to-end encryption (DAVE) for voice.
 - **Interaction:** slash commands, context menu commands (e.g. "Apps → Save quote"), buttons and select menus, and prefix commands in messages, e.g. `!dice 2d6`. Prefix commands need the privileged Message Content intent. Their parser is platform-neutral, as Signal, which has no slash commands, will need it too.
 - **Languages:** German and English. Interactions answer in the language of the person (their Discord locale); welcome messages and prefix commands in the language set for the server; English for every other language.
@@ -68,7 +68,42 @@ Decided in `feature/polls`, with the user: Discord's own polls.
 - **PuppyBot posts the poll as a message of its own,** and tells the person who asked that it did: twilight's type of polls has no field for how long a new poll runs, so PuppyBot writes the body of the message itself (`payload_json`).
 - **The limits:** a question of up to 300 characters, 2 to 10 answers of up to 55 characters, and 1 to 168 hours, by default 24. The sources at hand disagreed whether Discord allows 7 or 32 days, so 7 it is, which both allow.
 - **As a text command,** the question and the answers are separated by `|`; the poll runs 24 hours, with one answer each.
-- **The texts** are still one enum, whose two functions, one per language, are now longer than Clippy likes (`too_many_lines`, allowed there with its reason). The plan's enum per area, e.g. for settings, dice and polls, is a refactoring of its own, before the next features.
+- **The texts** are still one enum, whose two functions, one per language, are now longer than Clippy likes (`too_many_lines`, allowed there with its reason). New areas with many texts, e.g. the answers of the games, get an enum of their own; splitting the one there is would touch every place that uses a text, for little.
+
+Decided in `feature/info_commands`:
+
+- **`/server`** asks Discord's API for the server with its counts, `approximate_member_count`, when someone asks: a count from the gateway would be old soon, as PuppyBot doesn't get the members' events without the privileged intent Server Members.
+- **`/user`** takes the person and the date they joined from what Discord sends with the command or the message; no request is needed. When something came to Discord follows from its ID, which begins with the milliseconds since 2015.
+- **Dates are Discord's timestamps,** `<t:…:D>` and `<t:…:R>`, which Discord shows in the language and time zone of each reader.
+- **What others wrote, e.g. names, appears as it is:** the texts in `puppybot-core` clip it and put a backslash before each character that Discord reads as Markdown, a link, an emoji or a mention, so that a name like `[Nitro](https://…)` can't hide a link in PuppyBot's message. Line breaks become spaces, and the marks that turn the direction of the writing are left out.
+
+Decided in `feature/games`, with the user: a coin, the magic 8-ball, rock, paper, scissors, and guessing a number.
+
+- **The games answer in the channel,** for everyone there, as the dice do, in the language of the person who played.
+- **Rock, paper, scissors has buttons,** with the IDs `rps:rock`, `rps:paper` and `rps:scissors`. PuppyBot chooses its hand when someone clicks, and answers the click by changing the message: the outcome takes the place of the buttons, so a message is one game, and PuppyBot keeps nothing. A click on another button gets no answer.
+- **Guessing a number** has one game per channel, in memory only: a restart ends the games, which is fine for a game and keeps them out of the database. A game goes up to 2 to 1000000, by default 100; guesses outside it don't count as tries.
+- **The magic 8-ball** has the 20 classic answers, in German and English.
+- **The texts** are an enum of their own, `GameText` in `puppybot-core`, as decided in `feature/polls`.
+
+Decided in `feature/quotes`, with the user: everyone saves, the person quoted deletes.
+
+- **Saving** is a command in the menu of messages, Apps → Save quote, for everyone on the server; the answer is only for them. PuppyBot keeps the text without the spaces around it, up to 500 characters, so that every quote fits into a message also with a backslash before each character; the author's name at that time; and the IDs of the author, the channel and the message. A message is a quote once, and a server has at most 10000.
+- **Showing,** with `/quote show` and `!quote`, is for everyone in the channel: by number, or at random with the system's randomness. Numbers aren't given twice, so a number always means the same quote. The text appears as it is (`text::literal`), as a block quote, with the name, the date of the message as a timestamp, and a link to it.
+- **Deleting** is for the person quoted, and for people with Manage Messages in the channel, as Discord sends with the command; the database checks the author in the same write. When a message is deleted, its quote goes, too: `MESSAGE_DELETE` and `MESSAGE_DELETE_BULK` come with the intent `GUILD_MESSAGES`, which PuppyBot has. A read checks first, so most deleted messages don't write to the disk.
+- **Three tables:** `quotes` by server and number, `quoted` by server and message, against saving one twice and to find the quote of a deleted message, and `quote_numbers`, the last number of each server. They belong to the version 1 of the data: opening an older database adds them.
+- **A test checks the commands as Discord would,** with twilight-validate, which twilight-http brings anyway: the fake Discord of the tests doesn't check them.
+
+Decided for `feature/github_notifications`, with the user, on 2026-11-09:
+
+- **GitHub's REST API, polled** about every 5 minutes, with ETags; the configuration can change the interval. No webhooks, so PuppyBot keeps no open port. Without a token, GitHub allows 60 requests an hour per address, and answers of "not modified" count too, so PuppyBot checks less often as more repositories come; with a token 5000, and those answers are free.
+- **The token is optional,** from a file that `[github] token-file` names, like Discord's. As only public repositories are allowed, a fine-grained token with access to public repositories, read-only, is enough: it can read nothing private, even if it leaks.
+- **Only public repositories:** PuppyBot checks with GitHub that a repository is public when someone adds it, and again every hour, and announces nothing of one that became private.
+- **Server admins set it up,** with `/github add`, `remove` and `list`, for people who may manage the server, saved per server in the database, up to 10 repositories per server. A repository has a channel, the default branch or a chosen one, and its releases or not.
+- **The first check of a new repository** only notes its newest commit and release, so nothing old is announced.
+- **One message per push:** the new commits that a check finds, up to 10, each with its short hash, linked, its title and its author, then "and N more". If the last known commit is gone, e.g. after a force push, PuppyBot posts the newest with a link to the history of the branch. **Releases** with their tag, name and link. Titles, names and tags appear as they are, without Markdown, mentions or links.
+- **Only `https://api.github.com`,** as only Discord's addresses: tests may give an address on this machine instead, nothing else, so the protection of the integrations isn't needed for it.
+- **The HTTP client** is hyper-util's with hyper-rustls, which twilight-http brings already, with rustls and ring: no new crate.
+- **The checks run between the events of Discord,** in the same task, so that a slow answer of GitHub can't keep twilight from sending its heartbeats; `/github add` answers Discord first that it is working, as Discord waits only 3 seconds.
 
 ## Structure
 
@@ -94,9 +129,10 @@ One branch and pull request each, in this order:
 2. `feature/discord_connection`, done: twilight's gateway with the intents needed, reconnecting, the servers of the configuration, the slash commands registered with German and English descriptions, and a first command, `/info`.
 3. `feature/storage`, done: redb for the settings of each server, with a version of the stored data for later changes. The first setting: the language of each server, `/settings language`, for people with "Manage Server", in German or English, for the texts that aren't addressed to one person.
 4. `feature/prefix_commands`, done: the platform-neutral parser of prefix commands in `puppybot-core`, with a fuzz target, and a prefix for each server.
-5. `feature/utility_commands`: dice (an expression parser with a fuzz target), polls, info commands, quotes and small games.
-6. `feature/onboarding`: welcome messages, self-roles, confirming the rules, events and reminders.
-7. `feature/feeds`: RSS and Atom, YouTube and GitHub, with the protection above; then `feature/twitch`.
+5. The utility commands, done, each in a branch of its own: `feature/dice` (an expression parser with a fuzz target), `feature/polls`, `feature/info_commands`, `feature/games` and `feature/quotes`.
+6. `feature/github_notifications`: new commits and releases of GitHub repositories, posted to channels, as decided below.
+7. `feature/onboarding`: welcome messages, self-roles, confirming the rules, events and reminders.
+8. `feature/feeds`: RSS and Atom, and YouTube, with the protection above; then `feature/twitch`.
 
 ## Open Questions
 
