@@ -42,6 +42,8 @@ twilight-model = "0.18.0"
 twilight-util = { version = "0.18.0", features = ["builder"] }
 # The database: one file, in pure Rust and without dependencies.
 redb = "4.5.0"
+# Random numbers of the system, for dice and games: ring, which TLS uses already.
+ring = { version = "0.17.14", default-features = false }
 # For the tests: Discord on this machine, see crates/puppybot/tests/common.
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 http-body-util = "0.1.5"

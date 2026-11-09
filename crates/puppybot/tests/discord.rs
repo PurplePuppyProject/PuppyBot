@@ -13,9 +13,9 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use common::{
-    APPLICATION, CHANNEL_MESSAGES, FakeDiscord, GUILD, MANAGE_GUILD, MENTION, OTHER_GUILD, Running,
-    SETTINGS_ANSWER, Send, TOKEN, config, guild_create, interaction, message, ready, settings,
-    setup,
+    APPLICATION, CHANNEL_MESSAGES, COMMAND_ANSWER, FakeDiscord, GUILD, MANAGE_GUILD, MENTION,
+    OTHER_GUILD, Running, Send, TOKEN, config, guild_create, interaction, message, ready, settings,
+    setup, slash,
 };
 
 /// Starts PuppyBot with `discord`.
@@ -208,7 +208,7 @@ fn the_language_of_a_server_stays_after_a_restart() {
     );
     let (dir, mut bot) = start(&discord);
     // In the language of the person who asked.
-    let answer = discord.wait_for_request(SETTINGS_ANSWER);
+    let answer = discord.wait_for_request(COMMAND_ANSWER);
     assert!(
         answer
             .body
@@ -233,7 +233,7 @@ fn the_language_of_a_server_stays_after_a_restart() {
     );
     fs::write(dir.path().join("config.toml"), config(Some(&discord), "")).unwrap();
     let bot = Running::start(dir.path(), &[]);
-    let answer = discord.wait_for_request(SETTINGS_ANSWER);
+    let answer = discord.wait_for_request(COMMAND_ANSWER);
     assert!(
         answer
             .body
@@ -252,7 +252,7 @@ fn settings_only_for_people_who_may_manage_the_server() {
         None,
     );
     let (_dir, bot) = start(&discord);
-    let answer = discord.wait_for_request(SETTINGS_ANSWER);
+    let answer = discord.wait_for_request(COMMAND_ANSWER);
     assert!(
         answer.body.contains(
             "Die Einstellungen von PuppyBot dürfen nur Leute nutzen, die diesen Server verwalten dürfen."
@@ -358,7 +358,7 @@ fn the_prefix_and_the_language_of_a_server() {
     let settings_answers: Vec<_> = discord
         .requests()
         .into_iter()
-        .filter(|request| format!("{} {}", request.method, request.path) == SETTINGS_ANSWER)
+        .filter(|request| format!("{} {}", request.method, request.path) == COMMAND_ANSWER)
         .collect();
     assert!(
         settings_answers[0]
@@ -372,4 +372,84 @@ fn the_prefix_and_the_language_of_a_server() {
         .filter(|request| format!("{} {}", request.method, request.path) == CHANNEL_MESSAGES)
         .count();
     assert_eq!(answers, 1);
+}
+
+/// The requests to `path` that `discord` got, once there are `count` of them, or after waiting
+/// for long.
+fn requests_to(discord: &FakeDiscord, path: &str, count: usize) -> Vec<common::Request> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let requests: Vec<_> = discord
+            .requests()
+            .into_iter()
+            .filter(|request| format!("{} {}", request.method, request.path) == path)
+            .collect();
+        if requests.len() >= count || Instant::now() > deadline {
+            return requests;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn dice_in_the_channel_or_secret() {
+    let discord = FakeDiscord::start(
+        |url| {
+            vec![
+                ready(url),
+                slash(
+                    "dice",
+                    r#"[{"name": "expression", "type": 3, "value": "2W6+3"}]"#,
+                    "en-US",
+                    0,
+                ),
+                slash(
+                    "dice",
+                    r#"[{"name": "secret", "type": 5, "value": true}]"#,
+                    "de",
+                    0,
+                ),
+                message(1, "!würfel 3d4kh2", GUILD, false),
+                message(2, "!roll 2d", GUILD, false),
+            ]
+        },
+        None,
+    );
+    let (_dir, bot) = start(&discord);
+    let commands = requests_to(&discord, COMMAND_ANSWER, 2);
+    let texts = requests_to(&discord, CHANNEL_MESSAGES, 2);
+    let (status, log) = bot.stop_with("TERM");
+    assert_eq!(status, Some(0), "{log}");
+    assert_eq!(
+        (commands.len(), texts.len()),
+        (2, 2),
+        "{commands:#?} {texts:#?}"
+    );
+
+    // For everyone in the channel, unless it is secret.
+    let public = &commands[0].body;
+    assert!(public.contains("`2d6+3` gives ["), "{public}");
+    assert!(public.contains("] + 3 = **"), "{public}");
+    assert!(!public.contains(r#""flags":64"#), "{public}");
+    assert!(
+        public.contains(r#""allowed_mentions":{"parse":[]}"#),
+        "{public}"
+    );
+    let ephemeral = &commands[1].body;
+    assert!(ephemeral.contains("`d6` ergibt ["), "{ephemeral}");
+    assert!(ephemeral.contains(r#""flags":64"#), "{ephemeral}");
+
+    // As text commands, in the language of the server.
+    assert!(
+        texts[0].body.contains("`3d4kh2` gives ["),
+        "{}",
+        texts[0].body
+    );
+    assert!(
+        texts[1]
+            .body
+            .contains("PuppyBot rolls expressions like `2d6+3`"),
+        "{}",
+        texts[1].body
+    );
 }

@@ -55,6 +55,13 @@ Decided in `feature/prefix_commands`, with the user:
 - **Text commands are answered in the channel,** as a reply without mentions, in the language of the server, as everyone there sees them; slash commands stay ephemeral, in the language of the person.
 - **PuppyBot reads the prefix for each message,** from the database: a read is short in redb. Floods of commands are held back only by the rate limits of Discord, which twilight keeps; limits of its own per person may come later.
 
+Decided in `feature/dice`:
+
+- **The notation:** `NdM`, also with the German `W`, terms added and subtracted, and `kh`, `k` or `kl` for the highest or lowest dice. Without an expression, one die with six sides. Limits: 100 dice, 1000 sides, 20 terms, numbers up to 1000000 and 100 characters, so every roll fits into a message.
+- **The randomness** is the system's, through ring's `SystemRandom`, which is already there for TLS: a fast generator like fastrand would let someone guess later rolls from earlier ones, e.g. in games. `puppybot-core` gets the dice from the program, and makes each side as likely, by dropping random numbers beyond the largest multiple of the sides.
+- **Rolls are for everyone in the channel,** as dice in a game are; `/dice` with `secret` shows the roll only to the person who asked, e.g. a game master. The other slash commands stay ephemeral.
+- **The slash command has German names,** `/würfel` with `ausdruck` and `geheim`, which Discord shows in German; the earlier commands have English names, as `info` is the same in both.
+
 ## Structure
 
 A Cargo workspace:

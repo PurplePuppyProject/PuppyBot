@@ -467,6 +467,7 @@ version = "0.1.0"
 dependencies = [
  "puppybot-core",
  "redb",
+ "ring",
  "rustls",
  "rustls-native-certs",
  "secrecy",

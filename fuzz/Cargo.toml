@@ -31,6 +31,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "dice"
+path = "fuzz_targets/dice.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "interaction"
 path = "fuzz_targets/interaction.rs"
 test = false

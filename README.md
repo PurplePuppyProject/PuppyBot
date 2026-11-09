@@ -6,7 +6,7 @@
 
 A Discord bot of the Purple Puppy Project, written in Rust; a Signal bot may follow.
 
-**Status: being built.** So far PuppyBot connects to Discord, works only on the servers that its [configuration](#configuration) names, answers [`/info`](#commands) and text commands such as `!info`, in German or English, and keeps the language and the prefix of each server in its database. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
+**Status: being built.** So far PuppyBot connects to Discord, works only on the servers that its [configuration](#configuration) names, answers [`/info`](#commands), rolls [dice](#dice), and answers text commands such as `!info`, in German or English, and keeps the language and the prefix of each server in its database. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
 
 The project holds itself to:
 
@@ -32,9 +32,10 @@ PuppyBot registers its commands only on the servers in `guilds`, and leaves any 
 |---|---|
 | `/info` | Shows what PuppyBot is, which version runs, and where its code is |
 | `/settings language` | Shows the language in which PuppyBot writes to everyone on the server, or changes it with `to`: German or English, by default English. Only for people who may manage the server |
+| `/dice`, in German `/würfel` | Rolls [dice](#dice), e.g. `2d6+3`, for everyone in the channel to see; with `secret`, only for the person who asked |
 | `/settings prefix` | Shows the prefix of the text commands on the server, or changes it with `to`: 1 to 5 characters of ASCII that one can see, but no spaces and none of `` < > @ # : / ` ``, by default `!`. Only for people who may manage the server |
 
-PuppyBot's answers are shown only to the person who asked, and mention nobody. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
+PuppyBot's answers are shown only to the person who asked, except those of `/dice`, and mention nobody. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
 
 Discord shows `/settings` only to people with the permission "Manage Server" or "Administrator". The server's admins can allow it to others in the server settings (Integrations), but PuppyBot answers only those who have one of the two permissions.
 
@@ -45,12 +46,25 @@ Messages that start with the prefix of the server, `!` unless someone chose anot
 | Text command | What it does |
 |---|---|
 | `!info` | Shows what PuppyBot is, which version runs, and where its code is |
+| `!dice`, `!roll`, `!würfel` | Rolls [dice](#dice), e.g. `!würfel 2W6+3`, one die with six sides without an expression |
 | `!help`, `!hilfe` | Shows the text commands and the prefix |
 
 - The names work in any case, e.g. `!Hilfe`, and directly after the prefix: `! info` is no command.
 - PuppyBot answers in the channel, as a reply that mentions nobody, in the language of the server, as everyone in the channel sees it.
 - It ignores the messages of bots and webhooks, and commands it doesn't know, which may be for other bots with the same prefix.
 - It reads the text of every message on its servers, to find the commands, but keeps none of it.
+
+### Dice
+
+| Expression | What it rolls |
+|---|---|
+| `2d6`, `2W6` | Two dice with six sides, and their sum; `W` is the German notation |
+| `d20` | One die with twenty sides |
+| `2d6+3`, `3d8-2+1d4` | Dice and numbers, added and subtracted |
+| `4d6kh3`, `4d6k3` | Four dice, of which the highest three count |
+| `2d20kl1` | Two dice, of which the lowest counts |
+
+The case doesn't matter, and spaces may stand around `+` and `-`. PuppyBot rolls at most 100 dice at once, with up to 1000 sides, in at most 20 terms, with numbers up to 1000000, and expressions of up to 100 characters. The dice come from the randomness of the system, through ring, which TLS uses too, so nobody can guess the next roll from the last ones. Dice that don't count are struck through, e.g. `[6, ~~2~~, 5] = **11**`.
 
 ## Docker
 

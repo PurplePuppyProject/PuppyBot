@@ -21,6 +21,7 @@ pub mod files;
 #[cfg(any(test, fuzzing))]
 pub mod fuzz;
 pub mod logging;
+pub mod random;
 pub mod secret;
 pub mod shutdown;
 pub mod storage;

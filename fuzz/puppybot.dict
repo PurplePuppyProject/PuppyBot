@@ -24,6 +24,18 @@
 " = "
 "\x0a"
 
+# Dice.
+"d"
+"w"
+"kh"
+"kl"
+"k"
+"+"
+"-"
+"100"
+"1000"
+"20"
+
 # Text commands: the prefix on the first line, and the message, see fuzz/README.md.
 "<@1234>"
 "<@!1234>"
