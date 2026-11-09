@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use puppybot_core::dice::Dice;
 use puppybot_core::i18n::Lang;
+use puppybot_core::poll::Poll;
 use puppybot_core::text::Text;
 use puppybot_core::text_command::{self, TextCommand};
 use secrecy::{ExposeSecret, SecretString};
@@ -20,7 +21,7 @@ use twilight_model::channel::Message;
 use twilight_model::channel::message::{AllowedMentions, MessageType};
 use twilight_model::gateway::payload::incoming::Ready;
 use twilight_model::id::Id;
-use twilight_model::id::marker::GuildMarker;
+use twilight_model::id::marker::{ChannelMarker, GuildMarker, MessageMarker};
 
 use crate::commands::{self, Audience, Request};
 use crate::config::DiscordConfig;
@@ -225,7 +226,8 @@ impl Bot {
         let Some(asked) = commands::request(interaction, &self.guilds) else {
             return;
         };
-        let (content, audience) = self.execute(asked.request, asked.lang);
+        let channel = interaction.channel.as_ref().map(|channel| channel.id);
+        let (content, audience) = self.execute(asked.request, asked.lang, channel).await;
         let response = commands::response(content, audience);
         let answer = self.http.interaction(interaction.application_id);
         if let Err(error) = answer
@@ -236,9 +238,21 @@ impl Bot {
         }
     }
 
-    /// Does what `request` asks for, and returns the answer, in `lang`.
-    fn execute(&self, request: Request<'_>, lang: Lang) -> (String, Audience) {
+    /// Does what `request` asks for, in `channel`, and returns the answer, in `lang`.
+    async fn execute(
+        &self,
+        request: Request<'_>,
+        lang: Lang,
+        channel: Option<Id<ChannelMarker>>,
+    ) -> (String, Audience) {
         let content = match request {
+            Request::Poll(poll) => {
+                let posted = match channel {
+                    Some(channel) => self.post_poll(&poll, channel, None).await,
+                    None => false,
+                };
+                Text::poll_posted(posted).render(lang)
+            }
             Request::Roll { dice, secret } => {
                 let audience = if secret {
                     Audience::Asker
@@ -293,6 +307,24 @@ impl Bot {
         (content, Audience::Asker)
     }
 
+    /// Posts `poll` in `channel`, as a reply to `reply_to` if given, and returns whether it
+    /// worked. The body is PuppyBot's own: twilight's polls can't say how long they run.
+    async fn post_poll(
+        &self,
+        poll: &Poll,
+        channel: Id<ChannelMarker>,
+        reply_to: Option<Id<MessageMarker>>,
+    ) -> bool {
+        let body = poll_message(poll, reply_to);
+        match self.http.create_message(channel).payload_json(&body).await {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(channel = %channel, "can't post a poll: {error}");
+                false
+            }
+        }
+    }
+
     /// Rolls `dice`, and returns the answer, in `lang`.
     fn rolled(&self, dice: &Dice, lang: Lang) -> String {
         let mut side = self.die;
@@ -339,6 +371,15 @@ impl Bot {
                 Ok(dice) => self.rolled(&dice, lang),
                 Err(error) => Text::dice_error(error).render(lang),
             },
+            // The poll is the answer.
+            TextCommand::Poll => match Poll::parse(arguments) {
+                Ok(poll) => {
+                    self.post_poll(&poll, message.channel_id, Some(message.id))
+                        .await;
+                    return;
+                }
+                Err(error) => Text::poll_error(error).render(lang),
+            },
         };
         let nobody = AllowedMentions::default();
         let reply = self
@@ -377,6 +418,32 @@ impl Bot {
             }
         }
     }
+}
+
+/// The body of a message with `poll`, which mentions nobody, as a reply to `reply_to` if given.
+fn poll_message(poll: &Poll, reply_to: Option<Id<MessageMarker>>) -> Vec<u8> {
+    let answers: Vec<serde_json::Value> = poll
+        .answers()
+        .iter()
+        .map(|answer| serde_json::json!({ "poll_media": { "text": answer } }))
+        .collect();
+    let poll = serde_json::json!({
+        "question": { "text": poll.question() },
+        "answers": answers,
+        "duration": poll.hours(),
+        "allow_multiselect": poll.multiple(),
+        "layout_type": 1,
+    });
+    let nobody = serde_json::json!({ "parse": [] });
+    let message = match reply_to {
+        Some(message) => serde_json::json!({
+            "poll": poll,
+            "allowed_mentions": nobody,
+            "message_reference": { "message_id": message.to_string(), "fail_if_not_exists": false },
+        }),
+        None => serde_json::json!({ "poll": poll, "allowed_mentions": nobody }),
+    };
+    serde_json::to_vec(&message).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -478,23 +545,27 @@ mod tests {
             let guild = Id::new(GUILD);
             let en = |text: Text<'_>| (text.render(Lang::En), Audience::Asker);
             assert_eq!(
-                bot.execute(Request::ShowLanguage(guild), Lang::En),
+                bot.execute(Request::ShowLanguage(guild), Lang::En, None)
+                    .await,
                 en(Text::LanguageIs { chosen: None })
             );
             assert_eq!(bot.language(guild), Lang::En);
             assert_eq!(
-                bot.execute(Request::SetLanguage(guild, Lang::De), Lang::En),
+                bot.execute(Request::SetLanguage(guild, Lang::De), Lang::En, None)
+                    .await,
                 en(Text::LanguageSet { lang: Lang::De })
             );
             assert_eq!(
-                bot.execute(Request::ShowLanguage(guild), Lang::En),
+                bot.execute(Request::ShowLanguage(guild), Lang::En, None)
+                    .await,
                 en(Text::LanguageIs {
                     chosen: Some(Lang::De)
                 })
             );
             assert_eq!(bot.language(guild), Lang::De);
             assert_eq!(
-                bot.execute(Request::Answer(Text::NotHere), Lang::De),
+                bot.execute(Request::Answer(Text::NotHere), Lang::De, None)
+                    .await,
                 (Text::NotHere.render(Lang::De), Audience::Asker)
             );
         });
@@ -507,16 +578,19 @@ mod tests {
             let guild = Id::new(GUILD);
             let en = |text: Text<'_>| (text.render(Lang::En), Audience::Asker);
             assert_eq!(
-                bot.execute(Request::ShowPrefix(guild), Lang::En),
+                bot.execute(Request::ShowPrefix(guild), Lang::En, None)
+                    .await,
                 en(Text::PrefixIs { chosen: None })
             );
             assert_eq!(bot.prefix(guild), "!");
             assert_eq!(
-                bot.execute(Request::SetPrefix(guild, "pb?"), Lang::En),
+                bot.execute(Request::SetPrefix(guild, "pb?"), Lang::En, None)
+                    .await,
                 en(Text::PrefixSet { prefix: "pb?" })
             );
             assert_eq!(
-                bot.execute(Request::ShowPrefix(guild), Lang::En),
+                bot.execute(Request::ShowPrefix(guild), Lang::En, None)
+                    .await,
                 en(Text::PrefixIs {
                     chosen: Some("pb?")
                 })
@@ -535,17 +609,35 @@ mod tests {
             };
             let rolled = "`2d6+3` gives [6, 6] + 3 = **15**".to_owned();
             assert_eq!(
-                bot.execute(roll(false), Lang::En),
+                bot.execute(roll(false), Lang::En, None).await,
                 (rolled.clone(), Audience::Everyone)
             );
-            assert_eq!(bot.execute(roll(true), Lang::En), (rolled, Audience::Asker));
+            assert_eq!(
+                bot.execute(roll(true), Lang::En, None).await,
+                (rolled, Audience::Asker)
+            );
 
             // Without randomness, no roll.
             let mut bot = bot;
             bot.die = |_| None;
             assert_eq!(
-                bot.execute(roll(false), Lang::De),
+                bot.execute(roll(false), Lang::De, None).await,
                 (Text::DiceFailed.render(Lang::De), Audience::Everyone)
+            );
+        });
+    }
+
+    #[test]
+    fn polls_that_fail() {
+        in_runtime(async {
+            let bot = bot(Box::new(Storage::in_memory()));
+            let poll = || Request::Poll(Poll::parse("Pizza? | Ja | Nein").unwrap());
+            let failed = (Text::PollFailed.render(Lang::En), Audience::Asker);
+            // Without a channel, and in one where the API fails.
+            assert_eq!(bot.execute(poll(), Lang::En, None).await, failed);
+            assert_eq!(
+                bot.execute(poll(), Lang::En, Some(Id::new(4))).await,
+                failed
             );
         });
     }
@@ -562,7 +654,7 @@ mod tests {
                 Request::SetPrefix(guild, "?"),
             ] {
                 assert_eq!(
-                    bot.execute(request.clone(), Lang::De),
+                    bot.execute(request.clone(), Lang::De, None).await,
                     (Text::StorageFailed.render(Lang::De), Audience::Asker),
                     "{request:?}"
                 );

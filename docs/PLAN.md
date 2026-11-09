@@ -62,6 +62,14 @@ Decided in `feature/dice`:
 - **Rolls are for everyone in the channel,** as dice in a game are; `/dice` with `secret` shows the roll only to the person who asked, e.g. a game master. The other slash commands stay ephemeral.
 - **The slash command has German names,** `/würfel` with `ausdruck` and `geheim`, which Discord shows in German; the earlier commands have English names, as `info` is the same in both.
 
+Decided in `feature/polls`, with the user: Discord's own polls.
+
+- **Discord shows and counts them;** no votes are in PuppyBot's database. A poll can't be changed once posted, and bots can't vote.
+- **PuppyBot posts the poll as a message of its own,** and tells the person who asked that it did: twilight's type of polls has no field for how long a new poll runs, so PuppyBot writes the body of the message itself (`payload_json`).
+- **The limits:** a question of up to 300 characters, 2 to 10 answers of up to 55 characters, and 1 to 168 hours, by default 24. The sources at hand disagreed whether Discord allows 7 or 32 days, so 7 it is, which both allow.
+- **As a text command,** the question and the answers are separated by `|`; the poll runs 24 hours, with one answer each.
+- **The texts** are still one enum, whose two functions, one per language, are now longer than Clippy likes (`too_many_lines`, allowed there with its reason). The plan's enum per area, e.g. for settings, dice and polls, is a refactoring of its own, before the next features.
+
 ## Structure
 
 A Cargo workspace:

@@ -86,6 +86,24 @@ pub enum Text<'a> {
     DiceTooLarge,
     /// The answer when PuppyBot can't roll, as the system has no randomness.
     DiceFailed,
+    /// The description of /poll.
+    PollDescription,
+    /// The description of the option `question` of /poll.
+    PollQuestionDescription,
+    /// The description of the options `answer1` to `answer10` of /poll.
+    PollAnswerDescription,
+    /// The description of the option `hours` of /poll.
+    PollHoursDescription,
+    /// The description of the option `multiple` of /poll.
+    PollMultipleDescription,
+    /// The answer to /poll once the poll is in the channel.
+    PollPosted,
+    /// The answer to /poll when PuppyBot can't post the poll, e.g. without permission.
+    PollFailed,
+    /// The answer to a poll without a question or with too few answers.
+    PollInvalid,
+    /// The answer to a poll beyond the limits of [`crate::poll`].
+    PollTooLarge,
 }
 
 impl Text<'_> {
@@ -98,9 +116,28 @@ impl Text<'_> {
         }
     }
 
+    /// The answer to /poll once PuppyBot tried to post it: whether it `posted` it.
+    #[must_use]
+    pub const fn poll_posted(posted: bool) -> Text<'static> {
+        if posted {
+            Text::PollPosted
+        } else {
+            Text::PollFailed
+        }
+    }
+
+    /// The answer to a poll that PuppyBot doesn't post, as of `error`.
+    #[must_use]
+    pub const fn poll_error(error: crate::poll::Error) -> Text<'static> {
+        match error {
+            crate::poll::Error::Invalid => Text::PollInvalid,
+            crate::poll::Error::TooLarge => Text::PollTooLarge,
+        }
+    }
+
     /// All texts, with an example for each value they hold, e.g. for tests that each exists in
     /// every language.
-    pub const ALL: [Text<'static>; 29] = [
+    pub const ALL: [Text<'static>; 38] = [
         Text::InfoDescription,
         Text::Info { version: "1.2.3" },
         Text::UnknownCommand,
@@ -137,10 +174,19 @@ impl Text<'_> {
         Text::DiceInvalid,
         Text::DiceTooLarge,
         Text::DiceFailed,
+        Text::PollDescription,
+        Text::PollQuestionDescription,
+        Text::PollAnswerDescription,
+        Text::PollHoursDescription,
+        Text::PollMultipleDescription,
+        Text::PollPosted,
+        Text::PollFailed,
+        Text::PollInvalid,
+        Text::PollTooLarge,
     ];
 
     /// The descriptions in the list of commands, which Discord limits to 100 characters.
-    pub const DESCRIPTIONS: [Text<'static>; 9] = [
+    pub const DESCRIPTIONS: [Text<'static>; 14] = [
         Text::InfoDescription,
         Text::SettingsDescription,
         Text::LanguageDescription,
@@ -150,6 +196,11 @@ impl Text<'_> {
         Text::DiceDescription,
         Text::DiceExpressionDescription,
         Text::DiceSecretDescription,
+        Text::PollDescription,
+        Text::PollQuestionDescription,
+        Text::PollAnswerDescription,
+        Text::PollHoursDescription,
+        Text::PollMultipleDescription,
     ];
 
     /// The text in `lang`.
@@ -161,6 +212,10 @@ impl Text<'_> {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per text, so that a text without its translation doesn't compile"
+    )]
     fn de(&self) -> String {
         match self {
             Self::InfoDescription => "Zeigt, was PuppyBot ist und welche Version läuft".to_owned(),
@@ -233,6 +288,7 @@ impl Text<'_> {
                 "Die Textbefehle von PuppyBot beginnen hier mit `{prefix}` oder mit einer Erwähnung von PuppyBot:\n\
                  - `{prefix}info`: was PuppyBot ist und welche Version läuft\n\
                  - `{prefix}würfel 2W6+3`: würfelt, z. B. auch `W20` oder `4W6kh3`\n\
+                 - `{prefix}umfrage Pizza? | Ja | Nein`: startet eine Umfrage für 24 Stunden\n\
                  - `{prefix}hilfe`: diese Befehle\n\
                  Seine Slash-Befehle, z. B. `/info`, stehen in Discords Liste der Befehle."
             ),
@@ -253,9 +309,35 @@ impl Text<'_> {
             Self::DiceFailed => {
                 "PuppyBot kann gerade nicht würfeln. Bitte später noch einmal versuchen.".to_owned()
             }
+            Self::PollDescription => "Startet eine Umfrage, die Discord auszählt".to_owned(),
+            Self::PollQuestionDescription => "Die Frage, bis zu 300 Zeichen".to_owned(),
+            Self::PollAnswerDescription => "Eine Antwort, bis zu 55 Zeichen".to_owned(),
+            Self::PollHoursDescription => {
+                "Wie viele Stunden sie läuft: 1 bis 168, ohne es 24".to_owned()
+            }
+            Self::PollMultipleDescription => {
+                "Ob man mehr als eine Antwort wählen darf".to_owned()
+            }
+            Self::PollPosted => "PuppyBot hat die Umfrage gepostet.".to_owned(),
+            Self::PollFailed => {
+                "PuppyBot kann die Umfrage hier nicht posten: Es braucht in diesem Kanal das Recht, Nachrichten und Umfragen zu senden."
+                    .to_owned()
+            }
+            Self::PollInvalid => {
+                "Eine Umfrage braucht eine Frage und 2 bis 10 Antworten, keine davon leer; als Textbefehl getrennt durch `|`, z. B. `Pizza oder Pasta? | Pizza | Pasta`."
+                    .to_owned()
+            }
+            Self::PollTooLarge => {
+                "Eine Umfrage hat eine Frage mit bis zu 300 Zeichen und höchstens 10 Antworten mit bis zu 55 Zeichen, und sie läuft 1 bis 168 Stunden."
+                    .to_owned()
+            }
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per text, so that a text without its translation doesn't compile"
+    )]
     fn en(&self) -> String {
         match self {
             Self::InfoDescription => "Shows what PuppyBot is and which version runs".to_owned(),
@@ -323,6 +405,7 @@ impl Text<'_> {
                 "PuppyBot's text commands start with `{prefix}` here, or with a mention of PuppyBot:\n\
                  - `{prefix}info`: what PuppyBot is, and which version runs\n\
                  - `{prefix}dice 2d6+3`: rolls dice, e.g. also `d20` or `4d6kh3`\n\
+                 - `{prefix}poll Pizza? | Yes | No`: starts a poll for 24 hours\n\
                  - `{prefix}help`: these commands\n\
                  Its slash commands, e.g. `/info`, are in Discord's list of commands."
             ),
@@ -342,6 +425,28 @@ impl Text<'_> {
             }
             Self::DiceFailed => {
                 "PuppyBot can't roll right now. Please try again later.".to_owned()
+            }
+            Self::PollDescription => "Starts a poll, which Discord counts".to_owned(),
+            Self::PollQuestionDescription => "The question, up to 300 characters".to_owned(),
+            Self::PollAnswerDescription => "An answer, up to 55 characters".to_owned(),
+            Self::PollHoursDescription => {
+                "How many hours it runs: 1 to 168, 24 without it".to_owned()
+            }
+            Self::PollMultipleDescription => {
+                "Whether one may choose more than one answer".to_owned()
+            }
+            Self::PollPosted => "PuppyBot posted the poll.".to_owned(),
+            Self::PollFailed => {
+                "PuppyBot can't post the poll here: it needs the permission to send messages and polls in this channel."
+                    .to_owned()
+            }
+            Self::PollInvalid => {
+                "A poll needs a question and 2 to 10 answers, none of them empty; as a text command separated by `|`, e.g. `Pizza or pasta? | Pizza | Pasta`."
+                    .to_owned()
+            }
+            Self::PollTooLarge => {
+                "A poll has a question of up to 300 characters and at most 10 answers of up to 55 characters, and it runs 1 to 168 hours."
+                    .to_owned()
             }
         }
     }
@@ -377,6 +482,28 @@ mod tests {
     }
 
     #[test]
+    fn answers_of_polls_and_dice() {
+        assert_eq!(Text::poll_posted(true), Text::PollPosted);
+        assert_eq!(Text::poll_posted(false), Text::PollFailed);
+        assert_eq!(
+            Text::poll_error(crate::poll::Error::Invalid),
+            Text::PollInvalid
+        );
+        assert_eq!(
+            Text::poll_error(crate::poll::Error::TooLarge),
+            Text::PollTooLarge
+        );
+        assert_eq!(
+            Text::dice_error(crate::dice::Error::Invalid),
+            Text::DiceInvalid
+        );
+        assert_eq!(
+            Text::dice_error(crate::dice::Error::TooLarge),
+            Text::DiceTooLarge
+        );
+    }
+
+    #[test]
     fn the_help_and_the_prefix() {
         let help = Text::Help { prefix: "?" };
         assert_eq!(
@@ -384,6 +511,7 @@ mod tests {
             "PuppyBot's text commands start with `?` here, or with a mention of PuppyBot:\n\
              - `?info`: what PuppyBot is, and which version runs\n\
              - `?dice 2d6+3`: rolls dice, e.g. also `d20` or `4d6kh3`\n\
+             - `?poll Pizza? | Yes | No`: starts a poll for 24 hours\n\
              - `?help`: these commands\n\
              Its slash commands, e.g. `/info`, are in Discord's list of commands."
         );

@@ -6,7 +6,7 @@
 
 A Discord bot of the Purple Puppy Project, written in Rust; a Signal bot may follow.
 
-**Status: being built.** So far PuppyBot connects to Discord, works only on the servers that its [configuration](#configuration) names, answers [`/info`](#commands), rolls [dice](#dice), and answers text commands such as `!info`, in German or English, and keeps the language and the prefix of each server in its database. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
+**Status: being built.** So far PuppyBot connects to Discord, works only on the servers that its [configuration](#configuration) names, answers [`/info`](#commands), rolls [dice](#dice), posts [polls](#polls), and answers text commands such as `!info`, in German or English, and keeps the language and the prefix of each server in its database. What the bot will do, with which libraries, and the next steps are in [docs/PLAN.md](docs/PLAN.md).
 
 The project holds itself to:
 
@@ -21,7 +21,7 @@ PuppyBot works only on servers that you choose, so it is a private bot: only you
 1. Create an application with **New Application**.
 2. On **Installation**, check only **Guild Install** under **Installation Contexts**, and set the **Install Link** to **None**: a private bot can't have one.
 3. On **Bot**, turn **Public Bot** off, and get the token with **Reset Token**. It goes into the token file, see [Docker Compose](#docker-compose). Under **Privileged Gateway Intents**, turn on **Message Content Intent**, which the [text commands](#text-commands) need: without it, Discord closes the connection with the code 4014 and PuppyBot stops. Under 100 servers, Discord allows it without a review.
-4. On **OAuth2**, let the **URL Generator** make a link with the scopes `bot` and `applications.commands`, as a guild install, and the permissions **View Channels**, **Send Messages** and **Read Message History**, with which PuppyBot answers text commands in the channel. Open it to add the bot to a server; you need the permission "Manage Server" there. On a server that has the bot already, give it these permissions, e.g. by opening the new link.
+4. On **OAuth2**, let the **URL Generator** make a link with the scopes `bot` and `applications.commands`, as a guild install, and the permissions **View Channels**, **Send Messages**, **Read Message History** and **Create Polls**, with which PuppyBot answers text commands in the channel and posts polls. Open it to add the bot to a server; you need the permission "Manage Server" there. On a server that has the bot already, give it these permissions, e.g. by opening the new link.
 5. In Discord, turn on the developer mode (User Settings, Advanced), choose **Copy Server ID** in the menu of the server, and put the ID into `guilds` in the [configuration](#configuration).
 
 PuppyBot registers its commands only on the servers in `guilds`, and leaves any other server it is on, with a warning in its log.
@@ -33,6 +33,7 @@ PuppyBot registers its commands only on the servers in `guilds`, and leaves any 
 | `/info` | Shows what PuppyBot is, which version runs, and where its code is |
 | `/settings language` | Shows the language in which PuppyBot writes to everyone on the server, or changes it with `to`: German or English, by default English. Only for people who may manage the server |
 | `/dice`, in German `/würfel` | Rolls [dice](#dice), e.g. `2d6+3`, for everyone in the channel to see; with `secret`, only for the person who asked |
+| `/poll`, in German `/umfrage` | Posts a [poll](#polls) in the channel, which Discord shows and counts |
 | `/settings prefix` | Shows the prefix of the text commands on the server, or changes it with `to`: 1 to 5 characters of ASCII that one can see, but no spaces and none of `` < > @ # : / ` ``, by default `!`. Only for people who may manage the server |
 
 PuppyBot's answers are shown only to the person who asked, except those of `/dice`, and mention nobody. They are in German for people whose Discord is in German, and in English for everyone else; the language of the server is for what PuppyBot writes to everyone, e.g. welcome messages, which come later.
@@ -47,12 +48,21 @@ Messages that start with the prefix of the server, `!` unless someone chose anot
 |---|---|
 | `!info` | Shows what PuppyBot is, which version runs, and where its code is |
 | `!dice`, `!roll`, `!würfel` | Rolls [dice](#dice), e.g. `!würfel 2W6+3`, one die with six sides without an expression |
+| `!poll`, `!umfrage` | Posts a [poll](#polls), e.g. `!umfrage Pizza oder Pasta? \| Pizza \| Pasta` |
 | `!help`, `!hilfe` | Shows the text commands and the prefix |
 
 - The names work in any case, e.g. `!Hilfe`, and directly after the prefix: `! info` is no command.
 - PuppyBot answers in the channel, as a reply that mentions nobody, in the language of the server, as everyone in the channel sees it.
 - It ignores the messages of bots and webhooks, and commands it doesn't know, which may be for other bots with the same prefix.
 - It reads the text of every message on its servers, to find the commands, but keeps none of it.
+
+### Polls
+
+PuppyBot posts polls as Discord's own, which Discord shows and counts; nobody's vote is in PuppyBot's database. A poll has a question of up to 300 characters, 2 to 10 answers of up to 55 characters, and runs 1 to 168 hours, 7 days, by default 24.
+
+- `/poll` takes the question, `answer1` to `answer10`, of which the first two are needed, `hours`, and `multiple`, if one may choose more than one answer. PuppyBot posts the poll in the channel and tells the person who asked that it did, or why it couldn't.
+- `!poll` or `!umfrage` takes the question and the answers, separated by `|`, and posts the poll as the reply, for 24 hours, with one answer each.
+- PuppyBot needs the permission Create Polls in the channel, besides Send Messages.
 
 ### Dice
 

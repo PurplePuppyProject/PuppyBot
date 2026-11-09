@@ -8,5 +8,6 @@
 
 pub mod dice;
 pub mod i18n;
+pub mod poll;
 pub mod text;
 pub mod text_command;
