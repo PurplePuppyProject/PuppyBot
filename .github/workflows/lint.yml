@@ -23,7 +23,7 @@ jobs:
       - name: Setup Rust
         # Pinned, so lints added in new Rust releases don't break unrelated changes.
         # Bump deliberately and fix new findings in the same change.
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: "1.99.1"
           components: clippy, rustfmt
