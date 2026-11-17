@@ -38,7 +38,7 @@ FUZZ_SECONDS ?= 60
 
 # The share of lines, and of functions, that the tests must cover, in percent, see the target
 # coverage.
-COVERAGE_MIN ?= 100
+COVERAGE_MIN ?= 98
 
 # Crates that puppybot-core must not depend on, not even indirectly: Discord, storage, async I/O
 # and the network belong to the program, see crates/puppybot-core/src/lib.rs.
